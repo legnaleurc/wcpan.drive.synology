@@ -1,0 +1,33 @@
+[project]
+name = "wcpan-drive-synology"
+version = "1.0.0"
+description = "Synology Drive Web API integration for wcpan.drive"
+authors = [
+    { name = "Wei-Cheng Pan", email = "legnaleurc@gmail.com" }
+]
+readme = "README.md"
+requires-python = ">=3.12,<4.0"
+dependencies = [
+    "aiohttp>=3.13.0,<4.0.0",
+    "wcpan-drive-core>=5.0.6,<6.0.0",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.0,<1.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wcpan"]
