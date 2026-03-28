@@ -98,44 +98,50 @@ class SynologyDriveFileService(FileService):
         self,
         cursor: str,
     ) -> AsyncIterator[tuple[list[ChangeAction], str]]:
-        async with self._session.get(
-            f"{self._feed_url}/api/v1/changes",
-            params={"cursor": cursor},
-        ) as response:
-            data = await response.json()
+        has_more = True
 
-        new_cursor = str(data["cursor"])
-        raw_changes: list[_FeedRemoveChange | _FeedUpdateChange] = data["changes"]
+        while has_more:
+            async with self._session.get(
+                f"{self._feed_url}/api/v1/changes",
+                params={"cursor": cursor},
+            ) as response:
+                data = await response.json()
 
-        # path_cache: feed UUID → Synology path (None for the virtual super-root)
-        path_cache: dict[str, PurePosixPath | None] = {_SUPER_ROOT_ID: None}
-        changes: list[ChangeAction] = []
+            cursor = str(data["cursor"])
+            has_more = bool(data.get("has_more", False))
+            raw_changes: list[_FeedRemoveChange | _FeedUpdateChange] = data["changes"]
 
-        for raw in raw_changes:
-            match raw:
-                case {"removed": True, "node_id": node_id}:
-                    changes.append((True, node_id))
-                case {"removed": False, "node": record}:
-                    try:
-                        synology_path = await self._child_path(
-                            record["id"],
-                            record["parent_id"],
-                            record["name"],
-                            path_cache,
+            # path_cache: feed UUID → Synology path (None for the virtual super-root)
+            path_cache: dict[str, PurePosixPath | None] = {_SUPER_ROOT_ID: None}
+            changes: list[ChangeAction] = []
+
+            for raw in raw_changes:
+                match raw:
+                    case {"removed": True, "node_id": node_id}:
+                        changes.append((True, node_id))
+                    case {"removed": False, "node": record}:
+                        try:
+                            synology_path = await self._child_path(
+                                record["id"],
+                                record["parent_id"],
+                                record["name"],
+                                path_cache,
+                            )
+                        except NodeNotFoundError:
+                            continue
+                        path_cache[record["id"]] = synology_path
+                        changes.append(
+                            (
+                                False,
+                                _node_from_feed_record(
+                                    record, synology_path=synology_path
+                                ),
+                            )
                         )
-                    except NodeNotFoundError:
-                        continue
-                    path_cache[record["id"]] = synology_path
-                    changes.append(
-                        (
-                            False,
-                            _node_from_feed_record(record, synology_path=synology_path),
-                        )
-                    )
-                case _:
-                    raise ValueError(f"unexpected change record: {raw!r}")
+                    case _:
+                        raise ValueError(f"unexpected change record: {raw!r}")
 
-        yield changes, new_cursor
+            yield changes, cursor
 
     async def _child_path(
         self,
