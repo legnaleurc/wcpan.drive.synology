@@ -10,7 +10,7 @@ from pathlib import PurePosixPath
 from typing import Literal, TypedDict, override
 
 from aiohttp import ClientSession
-from wcpan.drive.core.exceptions import NodeExistsError
+from wcpan.drive.core.exceptions import NodeExistsError, NodeNotFoundError
 from wcpan.drive.core.types import (
     ChangeAction,
     CreateHasher,
@@ -116,9 +116,15 @@ class SynologyDriveFileService(FileService):
                 case {"removed": True, "node_id": node_id}:
                     changes.append((True, node_id))
                 case {"removed": False, "node": record}:
-                    synology_path = await self._child_path(
-                        record["id"], record["parent_id"], record["name"], path_cache
-                    )
+                    try:
+                        synology_path = await self._child_path(
+                            record["id"],
+                            record["parent_id"],
+                            record["name"],
+                            path_cache,
+                        )
+                    except NodeNotFoundError:
+                        continue
                     path_cache[record["id"]] = synology_path
                     changes.append(
                         (
@@ -153,6 +159,8 @@ class SynologyDriveFileService(FileService):
         async with self._session.get(
             f"{self._feed_url}/api/v1/nodes/{node_id}/path"
         ) as resp:
+            if resp.status == 404:
+                raise NodeNotFoundError(node_id)
             data = await resp.json()
         raw: str = data["path"]
         for feed_prefix, synology_prefix in self._path_map:
