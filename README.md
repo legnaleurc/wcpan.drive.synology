@@ -38,7 +38,7 @@ async with create_snapshot_service("./cache.db") as snapshot:
 
 ## Requirements
 
-- Python >= 3.12
+- Python >= 3.13
 - aiohttp >= 3.13.0
 - wcpan-drive-core >= 4.1.0
 

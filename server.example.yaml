@@ -1,0 +1,46 @@
+# Example configuration for wcpan.drive.synology server.
+# Copy to server.yaml (or another path) and adjust values.
+#
+# Run:
+#   wcpan.drive.synology serve --config /path/to/server.yaml
+#
+# Other commands (gc, enrich, squash) use the same file; see --help.
+
+# HTTP bind address (default: 127.0.0.1)
+host: "0.0.0.0"
+# HTTP port (default: 8080)
+port: 8080
+
+# SQLAlchemy-style URL (e.g. sqlite on disk or PostgreSQL).
+database_url: "sqlite:////data/mirror.db"
+
+# Synology DSM / Drive API base URL (scheme + host + port if needed).
+synology_url: "https://nas.example.com:5001"
+
+username: "your-drive-user"
+password: "your-password"
+
+# Optional: TOTP code if the account uses 2FA (when required by the API).
+# otp_code: "123456"
+
+# Mount label -> Synology folder path as seen by File Station / Drive.
+# Labels appear as virtual node ids "_<label>" under the server root.
+folders:
+  photos: "/volume1/photos"
+  # archive: "/volume1/archive"
+
+# Optional: map Synology path prefixes to local filesystem paths.
+# Needed for the "enrich" subcommand (media metadata from local files).
+# Keys should match or prefix the paths used in "folders".
+# volume_map:
+#   "/volume1/photos": "/mnt/nas/photos"
+
+# Public base URL of this server (used to register the webhook with Synology Drive).
+public_url: "https://my-server.example.com"
+# Stable identifier for this app's webhook registration (default: wcpan-drive-synology).
+# webhook_app_id: "wcpan-drive-synology"
+# Optional secret token for validating incoming webhook calls.
+# webhook_token: "my-secret-token"
+
+# Optional: log file path for wcpan.logging (omit for stderr-only).
+# log_path: "/var/log/wcpan-drive-synology.log"

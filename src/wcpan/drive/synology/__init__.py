@@ -1,6 +1,6 @@
 from importlib.metadata import version
 
-from ._service import create_service as create_service
+from .client import create_service as create_service
 
 
 __version__ = version(__package__ or __name__)
