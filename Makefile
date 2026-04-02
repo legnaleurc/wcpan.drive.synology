@@ -7,7 +7,7 @@ PKG_LOCK := uv.lock
 ENV_DIR := .venv
 ENV_LOCK := $(ENV_DIR)/pyvenv.cfg
 
-.PHONY: all format lint clean purge test build publish venv
+.PHONY: all format lint clean purge test coverage build publish venv
 
 all: venv
 
@@ -28,6 +28,10 @@ purge: clean
 test: venv
 	$(PYTHON) -m compileall src/wcpan
 	$(PYTHON) -m unittest
+
+coverage: venv
+	$(PYTHON) -m coverage run -m unittest discover -s tests
+	$(PYTHON) -m coverage report -m
 
 build: clean venv
 	uv build
