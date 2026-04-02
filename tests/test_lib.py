@@ -1,98 +1,152 @@
-from hashlib import sha256
+"""Tests for wcpan.drive.synology.lib.
+
+Each test uses given-when-then sections and unittest assertions.
+"""
+
+from datetime import UTC, datetime
 from unittest import TestCase
 
-from wcpan.drive.synology._lib import SynologyFileDict, node_from_api, path_to_id
+from wcpan.drive.synology.lib import (
+    FOLDER_MIME_TYPE,
+    guess_mime_type,
+    node_from_record,
+    node_record_from_dict,
+    node_record_to_dict,
+)
+from wcpan.drive.synology.types import NodeRecord
 
 
-def _make_dict(
-    path: str,
-    name: str,
-    parent_path: str | None = "/volume1",
-    is_folder: bool = False,
-) -> SynologyFileDict:
-    return SynologyFileDict(
-        id=path,
+_NOW = datetime(2024, 1, 1, tzinfo=UTC)
+
+
+def _make_record(
+    node_id: str = "file-id-001",
+    name: str = "test.txt",
+    parent_id: str | None = "parent-id-001",
+    is_directory: bool = False,
+) -> NodeRecord:
+    return NodeRecord(
+        node_id=node_id,
+        parent_id=parent_id,
         name=name,
-        parent_id=parent_path,
-        is_folder=is_folder,
-        trashed=False,
-        created_time="2024-01-01T00:00:00+00:00",
-        modified_time="2024-01-01T00:00:00+00:00",
-        mime_type="application/x-folder" if is_folder else "text/plain",
+        is_directory=is_directory,
+        ctime=_NOW,
+        mtime=_NOW,
+        mime_type=FOLDER_MIME_TYPE if is_directory else "text/plain",
+        hash="",
         size=0,
+        is_image=False,
+        is_video=False,
+        width=0,
+        height=0,
+        ms_duration=0,
     )
 
 
-class TestPathToId(TestCase):
-    def test_deterministic(self):
-        assert path_to_id("/volume1/data") == path_to_id("/volume1/data")
+class TestNodeFromRecord(TestCase):
+    def test_id_is_file_id(self):
+        # given
+        record = _make_record(node_id="synology-file-id-xyz")
+        # when
+        node = node_from_record(record)
+        # then
+        self.assertEqual(node.id, "synology-file-id-xyz")
 
-    def test_different_paths_differ(self):
-        assert path_to_id("/volume1/a") != path_to_id("/volume1/b")
-
-    def test_sha256_hex_length(self):
-        assert len(path_to_id("/some/path")) == 64
-
-    def test_matches_sha256(self):
-        path = "/volume1/documents/文件.txt"
-        expected = sha256(path.encode()).hexdigest()
-        assert path_to_id(path) == expected
-
-    def test_cjk_path(self):
-        # CJK paths should hash to the same fixed-length id
-        path = "/volume1/照片/假期/IMG_001.jpg"
-        result = path_to_id(path)
-        assert len(result) == 64
-        assert result == sha256(path.encode()).hexdigest()
-
-
-class TestNodeFromApi(TestCase):
-    def test_id_is_sha256_of_path(self):
-        data = _make_dict("/volume1/data/file.txt", "file.txt", "/volume1/data")
-        node = node_from_api(data)
-        assert node.id == path_to_id("/volume1/data/file.txt")
-
-    def test_parent_id_is_sha256_of_parent_path(self):
-        data = _make_dict("/volume1/data/file.txt", "file.txt", "/volume1/data")
-        node = node_from_api(data)
-        assert node.parent_id == path_to_id("/volume1/data")
+    def test_parent_id_preserved(self):
+        # given
+        record = _make_record(parent_id="parent-file-id-abc")
+        # when
+        node = node_from_record(record)
+        # then
+        self.assertEqual(node.parent_id, "parent-file-id-abc")
 
     def test_root_parent_id_is_none(self):
-        data = _make_dict("/volume1/data", "", parent_path=None, is_folder=True)
-        node = node_from_api(data)
-        assert node.parent_id is None
+        # given
+        record = _make_record(parent_id=None)
+        # when
+        node = node_from_record(record)
+        # then
+        self.assertIsNone(node.parent_id)
 
-    def test_private_contains_original_path(self):
-        path = "/volume1/data/file.txt"
-        data = _make_dict(path, "file.txt", "/volume1/data")
-        node = node_from_api(data)
-        assert node.private == {"path": path}
-
-    def test_private_contains_path_for_folder(self):
-        path = "/volume1/data/photos"
-        data = _make_dict(path, "photos", "/volume1/data", is_folder=True)
-        node = node_from_api(data)
-        assert node.private == {"path": path}
-
-    def test_cjk_path_id(self):
-        path = "/volume1/照片/假期"
-        data = _make_dict(path, "假期", "/volume1/照片", is_folder=True)
-        node = node_from_api(data)
-        assert node.id == path_to_id(path)
-        assert node.private == {"path": path}
+    def test_no_private(self):
+        # given
+        record = _make_record()
+        # when
+        node = node_from_record(record)
+        # then
+        self.assertIsNone(node.private)
 
     def test_name_preserved(self):
-        data = _make_dict("/volume1/data/file.txt", "file.txt", "/volume1/data")
-        node = node_from_api(data)
-        assert node.name == "file.txt"
+        # given
+        record = _make_record(name="document.pdf")
+        # when
+        node = node_from_record(record)
+        # then
+        self.assertEqual(node.name, "document.pdf")
 
-    def test_hash_from_dict(self):
-        data = _make_dict("/volume1/data/file.txt", "file.txt", "/volume1/data")
-        data["hash"] = "abc123"
-        node = node_from_api(data)
-        assert node.hash == "abc123"
+    def test_is_directory(self):
+        # given
+        record = _make_record(is_directory=True)
+        # when
+        node = node_from_record(record)
+        # then
+        self.assertTrue(node.is_directory)
+        self.assertFalse(node.is_trashed)
 
-    def test_hash_defaults_empty(self):
-        data = _make_dict("/volume1/data/file.txt", "file.txt", "/volume1/data")
-        node = node_from_api(data)
-        assert node.hash == ""
+
+class TestGuessMimeType(TestCase):
+    def test_directory(self):
+        # given
+        name = "anything"
+        # when
+        result = guess_mime_type(name, is_directory=True)
+        # then
+        self.assertEqual(result, FOLDER_MIME_TYPE)
+
+    def test_known_extension(self):
+        # given
+        name = "photo.jpg"
+        # when
+        result = guess_mime_type(name, is_directory=False)
+        # then
+        self.assertEqual(result, "image/jpeg")
+
+    def test_unknown_extension(self):
+        # given
+        name = "file.xyz123"
+        # when
+        result = guess_mime_type(name, is_directory=False)
+        # then
+        self.assertEqual(result, "application/octet-stream")
+
+    def test_no_extension(self):
+        # given
+        name = "noextension"
+        # when
+        result = guess_mime_type(name, is_directory=False)
+        # then
+        self.assertEqual(result, "application/octet-stream")
+
+
+class TestNodeRecordRoundtrip(TestCase):
+    def test_to_dict_and_back(self):
+        # given
+        record = _make_record()
+        # when
+        d = node_record_to_dict(record)
+        restored = node_record_from_dict(d)
+        # then
+        self.assertEqual(restored.node_id, record.node_id)
+        self.assertEqual(restored.parent_id, record.parent_id)
+        self.assertEqual(restored.name, record.name)
+        self.assertEqual(restored.ctime, record.ctime)
+        self.assertEqual(restored.mtime, record.mtime)
+
+    def test_cjk_name(self):
+        # given
+        record = _make_record(name="照片.jpg")
+        # when
+        d = node_record_to_dict(record)
+        restored = node_record_from_dict(d)
+        # then
+        self.assertEqual(restored.name, "照片.jpg")
