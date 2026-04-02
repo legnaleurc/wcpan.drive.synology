@@ -6,7 +6,7 @@ authors = [
     { name = "Wei-Cheng Pan", email = "legnaleurc@gmail.com" }
 ]
 readme = "README.md"
-requires-python = ">=3.12,<4.0"
+requires-python = ">=3.13,<4.0"
 dependencies = [
     "aiohttp>=3.13.0,<4.0.0",
     "wcpan-drive-core>=5.0.6,<6.0.0",
@@ -20,9 +20,21 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+[project.optional-dependencies]
+server = [
+    "pyyaml>=6.0,<7.0",
+    "pymediainfo>=6.0,<7.0",
+    "wcpan-logging>=2.1.0,<3.0.0",
+]
+
+[project.scripts]
+"wcpan.drive.synology" = "wcpan.drive.synology.server._main:main"
+
 [dependency-groups]
 dev = [
+    "coverage>=7.6.0,<8.0.0",
     "ruff>=0.15.0,<1.0.0",
+    "wcpan-drive-synology[server]",
 ]
 
 [build-system]
