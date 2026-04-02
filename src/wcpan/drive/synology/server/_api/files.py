@@ -296,6 +296,12 @@ def _multipart_body(
             b'Content-Disposition: form-data; name="path"\r\n'
             b"\r\n" + path.encode() + b"\r\n"
         )
+        # type field
+        yield (
+            b"--" + bnd + b"\r\n"
+            b'Content-Disposition: form-data; name="type"\r\n'
+            b"\r\nfile\r\n"
+        )
         # conflict_action field
         yield (
             b"--" + bnd + b"\r\n"

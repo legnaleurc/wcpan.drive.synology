@@ -6,6 +6,8 @@ from logging import getLogger
 
 from aiohttp import web
 
+from aiohttp.client_exceptions import ClientConnectionResetError
+
 from ..lib import (
     guess_mime_type,
     node_record_to_dict,
@@ -182,11 +184,14 @@ async def download_node(request: web.Request) -> web.StreamResponse:
     )
     await response.prepare(request)
 
-    async with synology_files.download_file(network, node_id, range_) as syno_response:
-        async for chunk in syno_response.content.iter_chunked(_CHUNK_SIZE):
-            await response.write(chunk)
+    try:
+        async with synology_files.download_file(network, node_id, range_) as syno_response:
+            async for chunk in syno_response.content.iter_chunked(_CHUNK_SIZE):
+                await response.write(chunk)
+        await response.write_eof()
+    except (ConnectionError, ClientConnectionResetError):
+        pass
 
-    await response.write_eof()
     return response
 
 
