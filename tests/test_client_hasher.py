@@ -1,9 +1,10 @@
-"""Tests for client MD5 hasher."""
+"""Tests for client MD4 hasher."""
 
-import hashlib
 from unittest import IsolatedAsyncioTestCase
 
-from wcpan.drive.synology.client._hasher import Md5Hasher, create_hasher
+from Crypto.Hash import MD4
+
+from wcpan.drive.synology.client._hasher import Md4Hasher, create_hasher
 
 
 class TestCreateHasher(IsolatedAsyncioTestCase):
@@ -14,23 +15,23 @@ class TestCreateHasher(IsolatedAsyncioTestCase):
         await hasher.update(b"hello")
         self.assertEqual(
             await hasher.hexdigest(),
-            hashlib.md5(b"hello").hexdigest(),
+            MD4.new(b"hello").hexdigest(),
         )
 
 
-class TestMd5Hasher(IsolatedAsyncioTestCase):
+class TestMd4Hasher(IsolatedAsyncioTestCase):
     async def test_hexdigest_and_digest(self):
         # given
-        inner = hashlib.md5()
-        h = Md5Hasher(inner)
+        inner = MD4.new()
+        h = Md4Hasher(inner)
         # when
         await h.update(b"ab")
         await h.update(b"c")
         hex_d = await h.hexdigest()
-        inner2 = hashlib.md5(b"abc")
+        inner2 = MD4.new(b"abc")
         # then
         self.assertEqual(hex_d, inner2.hexdigest())
-        self.assertEqual(await Md5Hasher(hashlib.md5(b"abc")).digest(), inner2.digest())
+        self.assertEqual(await Md4Hasher(MD4.new(b"abc")).digest(), inner2.digest())
 
     async def test_copy_independent(self):
         # given
@@ -41,5 +42,5 @@ class TestMd5Hasher(IsolatedAsyncioTestCase):
         await h.update(b"y")
         await c.update(b"z")
         # then
-        self.assertEqual(await h.hexdigest(), hashlib.md5(b"xy").hexdigest())
-        self.assertEqual(await c.hexdigest(), hashlib.md5(b"xz").hexdigest())
+        self.assertEqual(await h.hexdigest(), MD4.new(b"xy").hexdigest())
+        self.assertEqual(await c.hexdigest(), MD4.new(b"xz").hexdigest())

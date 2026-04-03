@@ -4,7 +4,8 @@
 # Run:
 #   wcpan.drive.synology serve --config /path/to/server.yaml
 #
-# Other commands (gc, enrich, squash) use the same file; see --help.
+# Other commands (gc, enrich, backfill, squash) use the same file; see --help.
+# backfill --path is a virtual mirror path (/ = server root, then mount names and folders).
 
 # HTTP bind address (default: 127.0.0.1)
 host: "0.0.0.0"

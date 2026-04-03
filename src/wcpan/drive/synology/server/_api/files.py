@@ -8,6 +8,7 @@ from typing import Any, NotRequired, TypedDict
 from aiohttp import ClientResponse
 
 from .._network import Network
+from .._virtual_ids import mount_name
 
 
 class SynologyFileInfo(TypedDict):
@@ -31,6 +32,65 @@ class SynologyFileInfo(TypedDict):
 def file_id_path(file_id: str) -> str:
     """Format a file_id as a Synology path reference."""
     return f"id:{file_id}"
+
+
+def _int_field(raw: dict[str, Any], key: str, default: int = 0) -> int:
+    v = raw.get(key, default)
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str) and v.isdigit():
+        return int(v, 10)
+    try:
+        return int(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def synology_file_info_from_api_dict(raw: dict[str, Any]) -> SynologyFileInfo:
+    """Normalize a Files.get / list ``data`` object into ``SynologyFileInfo``."""
+    info: SynologyFileInfo = {
+        "file_id": str(raw["file_id"]),
+        "parent_id": str(raw.get("parent_id", "")),
+        "name": str(raw.get("name", "")),
+        "type": str(raw.get("type", "file")),
+        "content_type": str(raw.get("content_type", "file")),
+        "size": _int_field(raw, "size", 0),
+        "created_time": _int_field(raw, "created_time", 0),
+        "modified_time": _int_field(raw, "modified_time", 0),
+        "sync_id": _int_field(raw, "sync_id", 0),
+    }
+    if "hash" in raw and raw["hash"] is not None:
+        info["hash"] = str(raw["hash"])
+    if "max_id" in raw and raw["max_id"] is not None:
+        info["max_id"] = _int_field(raw, "max_id", 0)
+    if "removed" in raw:
+        info["removed"] = bool(raw["removed"])
+    if raw.get("image_metadata") is not None:
+        info["image_metadata"] = raw["image_metadata"]
+    return info
+
+
+async def get_file_metadata_by_id(
+    network: Network,
+    file_id: str,
+) -> SynologyFileInfo | None:
+    """GET file metadata via ``path=id:{file_id}`` (SYNO.SynologyDrive.Files get)."""
+    url = f"{network.api_base}/files"
+    async with network.fetch(
+        "GET",
+        url,
+        params={"path": file_id_path(file_id)},
+    ) as response:
+        data = await response.json()
+
+    if not data.get("success", True):
+        return None
+    raw = data.get("data")
+    if not isinstance(raw, dict):
+        return None
+    return synology_file_info_from_api_dict(raw)
 
 
 async def list_folder(
@@ -127,17 +187,17 @@ async def list_folder_all_by_path(
     return all_items
 
 
-async def get_file_info(
+async def list_children_for_parent(
     network: Network,
     parent_id: str,
-    file_id: str,
-) -> "SynologyFileInfo | None":
-    """Fetch info for a specific file by listing its parent folder."""
-    items = await list_folder_all(network, parent_id)
-    for item in items:
-        if item["file_id"] == file_id:
-            return item
-    return None
+    folders: dict[str, str],
+) -> list[SynologyFileInfo]:
+    """List folder children; mount virtual parents use path listing, else ``id:`` listing."""
+    mkey = mount_name(parent_id)
+    if mkey is not None:
+        syno_path = folders[mkey]
+        return await list_folder_all_by_path(network, syno_path)
+    return await list_folder_all(network, parent_id)
 
 
 async def create_folder(

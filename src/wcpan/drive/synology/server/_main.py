@@ -1,6 +1,7 @@
 """CLI entry point for the wcpan.drive.synology server."""
 
 import argparse
+import asyncio
 import logging
 import sys
 from logging.config import dictConfig
@@ -14,6 +15,7 @@ from ..types import ServerConfig
 from ._app import create_app
 from ._db import cleanup_dangling_nodes, reset_change_history
 from ._enricher import backfill_media_metadata
+from ._reconcile import async_api_backfill
 
 
 _L = logging.getLogger(__name__)
@@ -39,6 +41,20 @@ def main() -> None:
     )
     subparsers.add_parser(
         "enrich", help="Backfill media metadata from local files (requires volume_map)"
+    )
+    backfill_p = subparsers.add_parser(
+        "backfill",
+        help="Reconcile node metadata under PATH with Synology Drive API",
+    )
+    backfill_p.add_argument(
+        "path",
+        type=str,
+        help="Virtual directory path in the mirror (e.g. / for root, /photos/Projects)",
+    )
+    backfill_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change without writing the database",
     )
     subparsers.add_parser(
         "squash", help="[DANGER] Reset change history to a single update per node"
@@ -78,6 +94,27 @@ def main() -> None:
             dict(vm),
         )
         print(f"Enriched {count} node(s).")
+        return
+
+    if args.command == "backfill":
+        config = _server_config_from_raw(raw)
+        try:
+            stats = asyncio.run(
+                async_api_backfill(
+                    config,
+                    args.path.strip(),
+                    dry_run=args.dry_run,
+                )
+            )
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            sys.exit(1)
+        print(
+            f"Checked {stats['checked']} node(s), "
+            f"updated {stats['updated']}, "
+            f"missing from API {stats['missing']}, "
+            f"list errors {stats['list_errors']}."
+        )
         return
 
     config = _server_config_from_raw(raw)

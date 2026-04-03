@@ -1,10 +1,10 @@
-"""Tests for _resolve_local_path (no disk / pymediainfo)."""
+"""Tests for resolve_local_path (no disk / pymediainfo)."""
 
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest import TestCase
 
-from wcpan.drive.synology.server._enricher import _resolve_local_path
+from wcpan.drive.synology.server._enricher import resolve_local_path
 from wcpan.drive.synology.types import NodeRecord
 
 
@@ -43,7 +43,7 @@ class TestResolveLocalPath(TestCase):
         folders = {"docs": "/volume1/docs"}
         volume_map = {"/volume1/docs": "/mnt/nas/docs"}
         # when
-        path = _resolve_local_path(file_rec, cache, folders, volume_map)
+        path = resolve_local_path(file_rec, cache, folders, volume_map)
         # then
         self.assertEqual(path, Path("/mnt/nas/docs/Projects/readme.txt"))
 
@@ -54,7 +54,7 @@ class TestResolveLocalPath(TestCase):
         folders = {"docs": "/volume1/docs"}
         volume_map = {"/volume1/docs": "/mnt/x"}
         # when
-        path = _resolve_local_path(file_rec, cache, folders, volume_map)
+        path = resolve_local_path(file_rec, cache, folders, volume_map)
         # then
         self.assertIsNone(path)
 
@@ -66,7 +66,7 @@ class TestResolveLocalPath(TestCase):
         folders = {"docs": "/volume1/docs"}
         volume_map = {"/other/prefix": "/mnt/other"}
         # when
-        path = _resolve_local_path(file_rec, cache, folders, volume_map)
+        path = resolve_local_path(file_rec, cache, folders, volume_map)
         # then
         self.assertIsNone(path)
 
@@ -81,6 +81,6 @@ class TestResolveLocalPath(TestCase):
             "/vol/share": "/mnt/share",
         }
         # when
-        path = _resolve_local_path(file_rec, cache, folders, volume_map)
+        path = resolve_local_path(file_rec, cache, folders, volume_map)
         # then
         self.assertEqual(path, Path("/mnt/share/sub/f.txt"))

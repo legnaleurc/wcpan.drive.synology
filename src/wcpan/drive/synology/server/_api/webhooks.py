@@ -6,10 +6,13 @@ async def create_webhook(
     url: str,
     app_id: str,
     token: str | None,
+    options: dict | None = None,
 ) -> str:
     body: dict = {"type": "url", "url": url, "app_id": app_id}
     if token is not None:
         body["token"] = token
+    if options is not None:
+        body["options"] = options
     async with network.fetch(
         "POST",
         f"{network.api_base}/webhooks",

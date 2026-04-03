@@ -1,13 +1,14 @@
 """aiohttp route handlers for the wcpan.drive.synology server."""
 
 from collections.abc import Mapping
+from dataclasses import replace
 from functools import partial
 from logging import getLogger
 
 from aiohttp import web
-
 from aiohttp.client_exceptions import ClientConnectionResetError
 
+from ..exceptions import SynologyNetworkError
 from ..lib import (
     guess_mime_type,
     node_record_to_dict,
@@ -17,6 +18,7 @@ from ..lib import (
 from ..types import NodeRecord
 from ._api import files as synology_files
 from ._api.changes import convert_file_info
+from ._api.files import SynologyFileInfo
 from ._db import Storage
 from ._enricher import enrich_media_before_upsert
 from ._keys import (
@@ -185,12 +187,19 @@ async def download_node(request: web.Request) -> web.StreamResponse:
     await response.prepare(request)
 
     try:
-        async with synology_files.download_file(network, node_id, range_) as syno_response:
+        async with synology_files.download_file(
+            network, node_id, range_
+        ) as syno_response:
             async for chunk in syno_response.content.iter_chunked(_CHUNK_SIZE):
                 await response.write(chunk)
         await response.write_eof()
     except (ConnectionError, ClientConnectionResetError):
-        pass
+        pass  # client disconnected
+    except SynologyNetworkError as e:
+        if isinstance(e.original_error, (ConnectionError, ClientConnectionResetError)):
+            pass  # client disconnect wrapped by network.fetch
+        else:
+            _L.warning("Download stream error for node %s: %s", node_id, e)
 
     return response
 
@@ -326,6 +335,39 @@ async def delete_node(request: web.Request) -> web.Response:
     return web.Response(status=204)
 
 
+async def _enrich_and_upsert_synology_node(
+    *,
+    info: SynologyFileInfo,
+    parent_id: str,
+    storage: Storage,
+    folders: dict[str, str],
+    volume_map: dict[str, str] | None,
+    off_main: OffMainThread,
+    wq: WriteQueue,
+    client_query: Mapping[str, str] | None = None,
+) -> NodeRecord:
+    record = convert_file_info(info, parent_id)
+    if client_query is not None:
+        width, height, ms_duration, is_image, is_video = _client_media_overlay(
+            client_query,
+            is_image=record.is_image,
+            is_video=record.is_video,
+        )
+        record = replace(
+            record,
+            is_image=is_image,
+            is_video=is_video,
+            width=width,
+            height=height,
+            ms_duration=ms_duration,
+        )
+    record = await enrich_media_before_upsert(
+        record, storage, folders, volume_map, off_main
+    )
+    await run_queued_write(wq, partial(storage.upsert_node_and_emit_change, record))
+    return record
+
+
 async def upload_node(request: web.Request) -> web.Response:
     storage, off_main, wq = _require_ready(request)
     network = request.app[network_key]
@@ -343,43 +385,25 @@ async def upload_node(request: web.Request) -> web.Response:
     mime_type = request.rel_url.query.get("mime_type") or None
     parent_ref = synology_parent_ref(parent_id, folders)
 
-    info = await synology_files.upload_file(
+    upload_info = await synology_files.upload_file(
         network=network,
         parent_ref=parent_ref,
         name=name,
         data=request.content.iter_chunked(_CHUNK_SIZE),
         mime_type=mime_type,
     )
+    info = synology_files.synology_file_info_from_api_dict(upload_info)
 
-    q = request.rel_url.query
-    is_image = info.get("content_type") == "image"
-    is_video = info.get("content_type") == "video"
-    width, height, ms_duration, is_image, is_video = _client_media_overlay(
-        q,
-        is_image=is_image,
-        is_video=is_video,
-    )
-
-    record = NodeRecord(
-        node_id=info["file_id"],
+    record = await _enrich_and_upsert_synology_node(
+        info=info,
         parent_id=parent_id,
-        name=info["name"],
-        is_directory=False,
-        ctime=utc_from_timestamp(info.get("created_time", 0)),
-        mtime=utc_from_timestamp(info.get("modified_time", 0)),
-        mime_type=guess_mime_type(info["name"], is_directory=False),
-        hash=info.get("hash", ""),
-        size=info.get("size", 0),
-        is_image=is_image,
-        is_video=is_video,
-        width=width,
-        height=height,
-        ms_duration=ms_duration,
+        storage=storage,
+        folders=folders,
+        volume_map=volume_map,
+        off_main=off_main,
+        wq=wq,
+        client_query=request.rel_url.query,
     )
-    record = await enrich_media_before_upsert(
-        record, storage, folders, volume_map, off_main
-    )
-    await run_queued_write(wq, partial(storage.upsert_node_and_emit_change, record))
     return web.json_response(_record_to_response(record), status=201)
 
 
@@ -393,18 +417,26 @@ async def _upsert_from_api(
     parent_id: str,
     file_id: str,
 ) -> bool:
-    """Fetch current file info from Synology and upsert into DB.
+    """Fetch metadata via GET ``/files`` (``path=id:{file_id}``) and upsert into DB.
 
-    Returns False if the file was not found in the parent listing.
+    *parent_id* is the client tree parent (e.g. virtual mount ids); it is not
+    taken from the API response so mount semantics stay correct.
+
+    Returns False if GET metadata failed.
     """
-    info = await synology_files.get_file_info(network, parent_id, file_id)
+    info = await synology_files.get_file_metadata_by_id(network, file_id)
     if info is None:
         return False
-    record = convert_file_info(info, parent_id)
-    record = await enrich_media_before_upsert(
-        record, storage, folders, volume_map, off_main
+    await _enrich_and_upsert_synology_node(
+        info=info,
+        parent_id=parent_id,
+        storage=storage,
+        folders=folders,
+        volume_map=volume_map,
+        off_main=off_main,
+        wq=wq,
+        client_query=None,
     )
-    await run_queued_write(wq, partial(storage.upsert_node_and_emit_change, record))
     return True
 
 

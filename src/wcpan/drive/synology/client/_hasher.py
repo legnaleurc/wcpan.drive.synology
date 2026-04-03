@@ -1,7 +1,7 @@
-import hashlib
 from collections.abc import Buffer
 from typing import Protocol, Self, override
 
+from Crypto.Hash import MD4
 from wcpan.drive.core.types import Hasher
 
 
@@ -13,10 +13,10 @@ class BuiltinHasher(Protocol):
 
 
 async def create_hasher() -> Hasher:
-    return Md5Hasher(hashlib.md5())
+    return Md4Hasher(MD4.new())
 
 
-class Md5Hasher(Hasher):
+class Md4Hasher(Hasher):
     def __init__(self, hasher: BuiltinHasher) -> None:
         self._hasher = hasher
 

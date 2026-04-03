@@ -9,57 +9,11 @@ from pymediainfo import MediaInfo  # type: ignore[import-untyped]
 from ..types import NodeRecord
 from ._db import Storage
 from ._lib import OffMainThread
-from ._virtual_ids import is_virtual, mount_name
+from ._paths import resolve_local_path
+from ._virtual_ids import is_virtual
 
 
 _L = getLogger(__name__)
-
-
-def _resolve_local_path(
-    record: NodeRecord,
-    node_cache: dict[str, NodeRecord | None],
-    folders: dict[str, str],
-    volume_map: dict[str, str],
-) -> Path | None:
-    """Reconstruct the local filesystem path for a node.
-
-    Walks up the DB tree (using the pre-fetched cache) to find the mount ancestor,
-    then applies volume_map prefix substitution.
-    """
-    parts: list[str] = [record.name]
-    current = record
-
-    while current.parent_id and not is_virtual(current.parent_id):
-        parent = node_cache.get(current.parent_id)
-        if parent is None:
-            return None
-        parts.append(parent.name)
-        current = parent
-
-    if not current.parent_id:
-        return None
-    mname = mount_name(current.parent_id)
-    if mname is None:
-        return None
-
-    syno_path = folders.get(mname)
-    if syno_path is None:
-        return None
-
-    relative = "/".join(reversed(parts))
-    full_syno = syno_path.rstrip("/") + "/" + relative
-
-    # Apply longest-prefix match from volume_map
-    best_prefix = ""
-    for prefix in volume_map:
-        if full_syno.startswith(prefix) and len(prefix) > len(best_prefix):
-            best_prefix = prefix
-
-    if not best_prefix:
-        return None
-
-    local_str = volume_map[best_prefix] + full_syno[len(best_prefix) :]
-    return Path(local_str)
 
 
 def _probe_sync(path: Path) -> tuple[int, int, int] | None:
@@ -115,7 +69,7 @@ async def enrich_media_before_upsert(
         return record
 
     node_cache = await _node_cache_for_path_resolution(record, storage, off_main)
-    local_path = _resolve_local_path(record, node_cache, folders, volume_map)
+    local_path = resolve_local_path(record, node_cache, folders, volume_map)
     if local_path is None or not local_path.exists():
         return record
 
@@ -158,7 +112,7 @@ def backfill_media_metadata(
     updated = 0
     for record in storage.list_media_backfill_candidates():
         node_cache = _node_cache_for_path_resolution_sync(record, storage)
-        local_path = _resolve_local_path(record, node_cache, folders, volume_map)
+        local_path = resolve_local_path(record, node_cache, folders, volume_map)
         if local_path is None or not local_path.exists():
             continue
         result = _probe_sync(local_path)

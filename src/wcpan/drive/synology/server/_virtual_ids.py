@@ -5,6 +5,9 @@ Virtual nodes use a leading underscore:
 
 - ``_`` — synthetic server root
 - ``_<name>`` — configured mount (e.g. ``_folder-a`` → ``folders["folder-a"]``)
+
+``folders`` maps a folder key to a **synology path** (the path on the NAS,
+e.g. ``{"photos": "/Photos"}``).  See ``_paths.py`` for the full terminology.
 """
 
 VIRTUAL_ID_PREFIX = "_"

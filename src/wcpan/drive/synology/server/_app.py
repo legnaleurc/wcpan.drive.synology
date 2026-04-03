@@ -83,6 +83,7 @@ async def _managed_webhook(
         f"{config.public_url}/api/v1/synology-webhook",
         config.webhook_app_id,
         webhook_token,
+        options={"filter_events": ["TrueEvent"]},
     )
     _L.info("Webhook registered: id=%s", webhook_id)
     try:
