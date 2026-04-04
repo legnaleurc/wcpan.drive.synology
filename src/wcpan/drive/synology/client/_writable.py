@@ -48,7 +48,7 @@ async def create_writable(
         yield _EmptyWritableFile(node)
         return
 
-    queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+    queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=8)
 
     async def _stream() -> AsyncIterator[bytes]:
         while True:
@@ -164,7 +164,7 @@ class _StreamingWritableFile(WritableFile):
 
     @override
     async def write(self, chunk: bytes) -> int:
-        self._queue.put_nowait(chunk)
+        await self._queue.put(chunk)
         return len(chunk)
 
     @override
