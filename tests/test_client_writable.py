@@ -79,7 +79,7 @@ def _make_writable(
     buf: tempfile.SpooledTemporaryFile | None = None,
 ) -> _ResumableWritableFile:
     if buf is None:
-        buf = tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="b")
+        buf = tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b")
     return _ResumableWritableFile(
         client, "http://srv", session_id, total_size, "f.bin", buf
     )
@@ -90,7 +90,7 @@ class TestResumableWritableFileFlush(IsolatedAsyncioTestCase):
         # given
         data = b"x" * 100
         client = _make_session("sid", total_size=100)
-        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="b") as buf:
+        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
             writable = _make_writable(client, "sid", 100, buf)
 
             # when
@@ -108,7 +108,7 @@ class TestResumableWritableFileFlush(IsolatedAsyncioTestCase):
     async def test_flush_is_idempotent(self):
         data = b"y" * 50
         client = _make_session("sid2", total_size=50)
-        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="b") as buf:
+        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
             writable = _make_writable(client, "sid2", 50, buf)
             await writable.write(data)
             await writable.flush()
@@ -132,7 +132,7 @@ class TestResumableWritableFileFlush(IsolatedAsyncioTestCase):
             ]
         )
 
-        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="b") as buf:
+        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
             writable = _make_writable(client, "sid3", total, buf)
             await writable.write(data)
             await writable.flush()
@@ -169,7 +169,7 @@ class TestResumableWritableFileRetry(IsolatedAsyncioTestCase):
             return_value=_response_cm(200, {"received": 0, "total": total})
         )
 
-        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="b") as buf:
+        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
             writable = _make_writable(client, "sid-mismatch", total, buf)
             await writable.write(b"a" * 100)
             await writable.flush()
@@ -194,7 +194,7 @@ class TestResumableWritableFileRetry(IsolatedAsyncioTestCase):
             return_value=_response_cm(200, {"received": 40, "total": total})
         )
 
-        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="b") as buf:
+        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
             writable = _make_writable(client, "sid-retry", total, buf)
             await writable.write(b"b" * 100)
             with patch("asyncio.sleep", new_callable=AsyncMock):
@@ -208,7 +208,7 @@ class TestResumableWritableFileRetry(IsolatedAsyncioTestCase):
         client = _make_session("sid-503", total_size=50)
         client.put = MagicMock(return_value=_response_cm(503, {}))
 
-        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="b") as buf:
+        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
             writable = _make_writable(client, "sid-503", 50, buf)
             await writable.write(b"c" * 50)
             with self.assertRaises(SynologyUploadError):
@@ -221,7 +221,7 @@ class TestResumableWritableFileRetry(IsolatedAsyncioTestCase):
         client = _make_session("sid-404", total_size=50)
         client.put = MagicMock(return_value=_response_cm(404, {}))
 
-        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="b") as buf:
+        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
             writable = _make_writable(client, "sid-404", 50, buf)
             await writable.write(b"d" * 50)
             with self.assertRaises(SynologyUploadError):
@@ -237,7 +237,7 @@ class TestResumableWritableFileRetry(IsolatedAsyncioTestCase):
             return_value=_response_cm(200, {"received": 0, "total": total})
         )
 
-        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="b") as buf:
+        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
             writable = _make_writable(client, "sid-maxretry", total, buf)
             await writable.write(b"e" * total)
             with patch("asyncio.sleep", new_callable=AsyncMock):

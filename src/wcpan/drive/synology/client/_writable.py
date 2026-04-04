@@ -62,7 +62,7 @@ async def create_writable(
         session_id = await _initiate_session(
             session, server_url, parent_id, name, size, mime_type, media_info
         )
-        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="b") as buf:
+        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
             writable = _ResumableWritableFile(
                 session, server_url, session_id, size, name, buf
             )
