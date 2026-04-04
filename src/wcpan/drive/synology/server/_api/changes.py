@@ -73,11 +73,13 @@ async def _scan_mount_level(
     volume_map: dict[str, str] | None,
     off_main: OffMainThread,
     write_queue: WriteQueue,
-) -> tuple[int, list[tuple[str, int]]]:
+) -> tuple[int, list[tuple[str, int, bool]]]:
     """Scan the first level of a mount via Synology path string.
 
     Returns (highest_sync_id, subfolders) where subfolders is a list of
-    (file_id, max_id) tuples for deeper BFS traversal.
+    (file_id, max_id, force_scan) tuples for deeper BFS traversal.
+    force_scan is True when the folder was not previously in the DB and
+    must be entered regardless of max_id pruning.
     """
     try:
         items = await list_folder_all_by_path(network, syno_path)
@@ -95,7 +97,7 @@ async def _scan_mount_level(
         acc.seen_ids.add(item["file_id"])
 
     highest = last_max_id
-    subfolders: list[tuple[str, int]] = []
+    subfolders: list[tuple[str, int, bool]] = []
     pending_upserts: list[NodeRecord] = []
 
     for item in items:
@@ -104,7 +106,8 @@ async def _scan_mount_level(
         if sync_id > highest:
             highest = sync_id
 
-        if sync_id > last_max_id or item["file_id"] not in db_child_ids:
+        is_new = item["file_id"] not in db_child_ids
+        if sync_id > last_max_id or is_new:
             record = convert_file_info(item, parent_id=mid)
             record = await enrich_media_before_upsert(
                 record, storage, folders, volume_map, off_main
@@ -112,7 +115,7 @@ async def _scan_mount_level(
             pending_upserts.append(record)
 
         if item["type"] == "dir":
-            subfolders.append((item["file_id"], max_id))
+            subfolders.append((item["file_id"], max_id, is_new))
 
     if pending_upserts:
         await run_queued_write(
@@ -131,7 +134,7 @@ async def _scan_mount_level(
 async def _scan_subtree_bfs(
     network: Network,
     storage: Storage,
-    initial: list[tuple[str, int]],
+    initial: list[tuple[str, int, bool]],
     last_max_id: int,
     acc: ScanAccumulator,
     *,
@@ -148,9 +151,9 @@ async def _scan_subtree_bfs(
     highest = last_max_id
 
     while queue:
-        folder_id, this_max_id = queue.pop(0)
+        folder_id, this_max_id, force_scan = queue.pop(0)
 
-        if last_max_id > 0 and this_max_id <= last_max_id:
+        if not force_scan and last_max_id > 0 and this_max_id <= last_max_id:
             _L.debug(
                 "Skipping folder %s (max_id=%d <= last_max_id=%d)",
                 folder_id,
@@ -182,7 +185,8 @@ async def _scan_subtree_bfs(
             if sync_id > highest:
                 highest = sync_id
 
-            if sync_id > last_max_id or item["file_id"] not in db_child_ids:
+            is_new = item["file_id"] not in db_child_ids
+            if sync_id > last_max_id or is_new:
                 record = convert_file_info(item, parent_id=folder_id)
                 record = await enrich_media_before_upsert(
                     record, storage, folders, volume_map, off_main
@@ -190,7 +194,7 @@ async def _scan_subtree_bfs(
                 pending_upserts.append(record)
 
             if item["type"] == "dir":
-                queue.append((item["file_id"], max_id))
+                queue.append((item["file_id"], max_id, is_new))
 
         if pending_upserts:
             await run_queued_write(
