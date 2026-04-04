@@ -169,6 +169,7 @@ def _server_config_from_raw(raw: dict) -> ServerConfig:
         volume_map=raw.get("volume_map"),
         otp_code=raw.get("otp_code"),
         log_path=raw.get("log_path"),
+        upload_tmp_dir=raw.get("upload_tmp_dir"),
     )
 
 

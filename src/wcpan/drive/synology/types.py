@@ -52,3 +52,4 @@ class ServerConfig:
     otp_code: str | None = None
     log_path: str | None = None
     volume_map: dict[str, str] | None = None
+    upload_tmp_dir: str | None = None

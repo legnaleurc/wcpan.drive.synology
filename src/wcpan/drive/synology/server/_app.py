@@ -3,6 +3,7 @@
 import asyncio
 import secrets
 from collections.abc import AsyncGenerator, Coroutine, Generator
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from logging import getLogger
@@ -15,13 +16,17 @@ from ._auth import AuthManager
 from ._db import Storage
 from ._handlers import (
     create_node,
+    create_upload_session,
     delete_node,
+    delete_upload_session,
     download_node,
     get_changes,
     get_cursor,
     get_node,
     get_root,
+    get_upload_session,
     handle_synology_webhook,
+    put_upload_chunk,
     update_node,
     upload_node,
 )
@@ -33,6 +38,7 @@ from ._keys import (
     ready_key,
     storage_key,
     trigger_event_key,
+    upload_sessions_key,
     volume_map_key,
     webhook_token_key,
     write_queue_key,
@@ -40,6 +46,7 @@ from ._keys import (
 from ._lib import OffMainThread
 from ._network import Network
 from ._scanner import run_scanner
+from ._upload_session import UploadSessionStore
 from ._workers import checkpoint_worker, create_write_queue, write_worker
 
 
@@ -119,6 +126,11 @@ async def _app_lifecycle(app: web.Application) -> AsyncGenerator[None, None]:
         app[off_main_key] = off_main
         app[write_queue_key] = write_queue
 
+        tmp_dir = Path(config.upload_tmp_dir) if config.upload_tmp_dir else None
+        session_store = UploadSessionStore(tmp_dir=tmp_dir)
+        app[upload_sessions_key] = session_store
+        stack.callback(session_store.close_all)
+
         _L.info("initializing database: %s", config.database_url)
         await off_main(storage.ensure_schema)
 
@@ -187,4 +199,8 @@ def _add_routes(app: web.Application) -> None:
     app.router.add_patch("/api/v1/nodes/{id}", update_node)
     app.router.add_delete("/api/v1/nodes/{id}", delete_node)
     app.router.add_post("/api/v1/nodes/{parent_id}/upload", upload_node)
+    app.router.add_post("/api/v1/nodes/{parent_id}/upload-session", create_upload_session)
+    app.router.add_put("/api/v1/upload-sessions/{session_id}", put_upload_chunk)
+    app.router.add_get("/api/v1/upload-sessions/{session_id}", get_upload_session)
+    app.router.add_delete("/api/v1/upload-sessions/{session_id}", delete_upload_session)
     app.router.add_post("/api/v1/synology-webhook", handle_synology_webhook)

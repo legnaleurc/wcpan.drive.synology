@@ -1,6 +1,7 @@
 """aiohttp route handlers for the wcpan.drive.synology server."""
 
-from collections.abc import Mapping
+import asyncio
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
 from functools import partial
 from logging import getLogger
@@ -32,12 +33,19 @@ from ._keys import (
     ready_key,
     storage_key,
     trigger_event_key,
+    upload_sessions_key,
     volume_map_key,
     webhook_token_key,
     write_queue_key,
 )
 from ._lib import OffMainThread
 from ._types import WriteQueue
+from ._upload_session import (
+    delete_temp_sync,
+    parse_content_range,
+    read_chunk_sync,
+    write_chunk_sync,
+)
 from ._virtual_ids import SERVER_ROOT_ID, is_virtual, synology_parent_ref
 from ._workers import run_queued_write
 
@@ -569,3 +577,178 @@ async def handle_synology_webhook(request: web.Request) -> web.Response:
         request.app[trigger_event_key].set()
 
     return web.Response(text="OK")
+
+
+# ---------- Resumable upload sessions ----------
+
+
+_MEDIA_QUERY_PARAMS = frozenset(
+    ("width", "height", "ms_duration", "media_image", "media_video")
+)
+_SESSION_READ_CHUNK = 4 * 1024 * 1024  # 4 MiB
+
+
+async def create_upload_session(request: web.Request) -> web.Response:
+    """POST /api/v1/nodes/{parent_id}/upload-session"""
+    _require_ready(request)
+    parent_id = request.match_info["parent_id"]
+
+    if parent_id == SERVER_ROOT_ID:
+        raise web.HTTPForbidden(reason="Cannot upload to virtual root")
+
+    q = request.rel_url.query
+    name = q.get("name", "")
+    if not name:
+        raise web.HTTPBadRequest(reason="Missing 'name' query parameter")
+
+    size_str = q.get("size", "")
+    if not size_str:
+        raise web.HTTPBadRequest(reason="Missing 'size' query parameter")
+    try:
+        total_size = int(size_str)
+    except ValueError:
+        raise web.HTTPBadRequest(reason="Invalid 'size': must be an integer")
+    if total_size <= 0:
+        raise web.HTTPBadRequest(reason="'size' must be a positive integer")
+
+    mime_type = q.get("mime_type") or None
+    client_query = {k: v for k, v in q.items() if k in _MEDIA_QUERY_PARAMS}
+
+    store = request.app[upload_sessions_key]
+    session = store.create(parent_id, name, total_size, mime_type, client_query)
+
+    return web.json_response(
+        {"session_id": session.session_id, "received": 0}, status=201
+    )
+
+
+async def put_upload_chunk(request: web.Request) -> web.Response:
+    """PUT /api/v1/upload-sessions/{session_id}"""
+    store = request.app[upload_sessions_key]
+    session_id = request.match_info["session_id"]
+    session = store.get(session_id)
+    if session is None:
+        raise web.HTTPNotFound()
+
+    parsed = parse_content_range(request.headers.get("Content-Range"))
+    if parsed is None:
+        raise web.HTTPBadRequest(reason="Missing or invalid Content-Range header")
+    start, end, total = parsed
+
+    if total != session.total_size:
+        raise web.HTTPConflict(reason="Content-Range total does not match session size")
+
+    async with session.lock:
+        # If all bytes are already on disk, skip the write and go straight to finalise.
+        if session.received < session.total_size:
+            if start != session.received:
+                return web.json_response(
+                    {"received": session.received}, status=409
+                )
+
+            data = await request.read()
+            expected_len = end - start + 1
+            if len(data) != expected_len:
+                raise web.HTTPBadRequest(
+                    reason=f"Body length {len(data)} does not match Content-Range {expected_len}"
+                )
+
+            off_main = request.app[off_main_key]
+            await off_main.untimed(write_chunk_sync, session.temp_path, start, data)
+            session.received = end + 1
+
+        if session.received < session.total_size:
+            return web.json_response({"received": session.received})
+
+        # All bytes received — upload to Synology.
+        return await _finalise_upload_session(request, store, session_id)
+
+
+async def _finalise_upload_session(
+    request: web.Request,
+    store,
+    session_id: str,
+) -> web.Response:
+    """Upload the complete temp file to Synology and clean up the session."""
+    session = store.get(session_id)
+    if session is None:
+        raise web.HTTPNotFound()
+
+    storage, off_main, wq = _require_ready(request)
+    network = request.app[network_key]
+    folders = request.app[folders_key]
+    volume_map = request.app[volume_map_key]
+    parent_ref = synology_parent_ref(session.parent_id, folders)
+
+    async def _iter_temp() -> AsyncIterator[bytes]:
+        offset = 0
+        while offset < session.total_size:
+            chunk = await off_main.untimed(
+                read_chunk_sync, session.temp_path, offset, _SESSION_READ_CHUNK
+            )
+            if not chunk:
+                break
+            yield chunk
+            offset += len(chunk)
+
+    try:
+        upload_info = await synology_files.upload_file(
+            network=network,
+            parent_ref=parent_ref,
+            name=session.name,
+            data=_iter_temp(),
+            mime_type=session.mime_type,
+        )
+    except SynologyUploadConflictError as e:
+        store.remove(session_id)
+        loop = asyncio.get_running_loop()
+        asyncio.ensure_future(
+            loop.run_in_executor(None, delete_temp_sync, session.temp_path)
+        )
+        raise web.HTTPConflict(reason=str(e))
+    except SynologyUploadError as e:
+        # Keep the session so the client can retry this PUT.
+        raise web.HTTPServiceUnavailable(reason=str(e))
+
+    info = synology_files.synology_file_info_from_api_dict(upload_info)
+    record = await _enrich_and_upsert_synology_node(
+        info=info,
+        parent_id=session.parent_id,
+        storage=storage,
+        folders=folders,
+        volume_map=volume_map,
+        off_main=off_main,
+        wq=wq,
+        client_query=session.client_query,
+    )
+
+    store.remove(session_id)
+    await off_main(delete_temp_sync, session.temp_path)
+
+    return web.json_response(_record_to_response(record), status=201)
+
+
+async def get_upload_session(request: web.Request) -> web.Response:
+    """GET /api/v1/upload-sessions/{session_id}"""
+    store = request.app[upload_sessions_key]
+    session_id = request.match_info["session_id"]
+    session = store.get(session_id)
+    if session is None:
+        raise web.HTTPNotFound()
+    return web.json_response(
+        {"received": session.received, "total": session.total_size}
+    )
+
+
+async def delete_upload_session(request: web.Request) -> web.Response:
+    """DELETE /api/v1/upload-sessions/{session_id}"""
+    store = request.app[upload_sessions_key]
+    session_id = request.match_info["session_id"]
+    session = store.remove(session_id)
+    if session is None:
+        raise web.HTTPNotFound()
+    loop = asyncio.get_running_loop()
+    asyncio.ensure_future(
+        loop.run_in_executor(None, delete_temp_sync, session.temp_path)
+    )
+    return web.Response(status=204)
