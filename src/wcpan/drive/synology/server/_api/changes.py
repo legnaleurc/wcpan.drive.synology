@@ -150,7 +150,7 @@ async def _scan_subtree_bfs(
     while queue:
         folder_id, this_max_id = queue.pop(0)
 
-        if this_max_id <= last_max_id:
+        if last_max_id > 0 and this_max_id <= last_max_id:
             _L.debug(
                 "Skipping folder %s (max_id=%d <= last_max_id=%d)",
                 folder_id,

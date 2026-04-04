@@ -213,6 +213,71 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         finally:
             os.unlink(db_path)
 
+    async def test_initial_scan_enters_folder_with_zero_max_id(self) -> None:
+        """Full initial scan (last_max_id=0) must enter folders whose max_id is 0."""
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            storage = Storage(db_path)
+            storage.ensure_schema()
+            storage.bulk_upsert_nodes(
+                [
+                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                    _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
+                ]
+            )
+
+            async def by_path(_net, path: str) -> list:
+                if path == "/vol/a":
+                    return [_syno_item("dirF", "F", is_dir=True, sync_id=0, max_id=0)]
+                return []
+
+            async def list_all(_net, folder_id: str) -> list:
+                if folder_id == "dirF":
+                    return [_syno_item("childC", "c.txt", sync_id=0)]
+                return []
+
+            q = create_write_queue()
+            with ThreadPoolExecutor(2) as pool:
+                off_main = OffMainThread(pool)
+                drain = asyncio.create_task(self._drain_writes(q, off_main))
+                try:
+                    with (
+                        patch.object(
+                            changes_mod,
+                            "list_folder_all_by_path",
+                            new=AsyncMock(side_effect=by_path),
+                        ),
+                        patch.object(
+                            changes_mod,
+                            "list_folder_all",
+                            new=AsyncMock(side_effect=list_all),
+                        ),
+                        patch.object(
+                            changes_mod,
+                            "enrich_media_before_upsert",
+                            new=_noop_enrich,
+                        ),
+                    ):
+                        await scan_all_mounts(
+                            network=None,  # type: ignore[arg-type]
+                            storage=storage,
+                            folders={"a": "/vol/a"},
+                            last_max_id=0,
+                            volume_map=None,
+                            off_main=off_main,
+                            write_queue=q,
+                        )
+                finally:
+                    drain.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await drain
+
+            self.assertIsNotNone(storage.get_node_by_id("dirF"))
+            self.assertIsNotNone(storage.get_node_by_id("childC"))
+        finally:
+            os.unlink(db_path)
+
     async def test_list_failure_preserves_db_subtree(self) -> None:
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
