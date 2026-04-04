@@ -21,7 +21,7 @@ _L = getLogger(__name__)
 _MAX_SPOOL = 64 * 1024 * 1024   # 64 MiB before spilling to disk
 _MAX_RETRIES = 5
 _CHUNK_SIZE = 4 * 1024 * 1024   # 4 MiB upload chunks
-_CHUNK_TIMEOUT = ClientTimeout(total=5 * 60)  # 5 min per chunk; stalled → retry
+_CHUNK_TIMEOUT = ClientTimeout(sock_read=5 * 60)  # 5 min without data → retry
 
 
 def _media_info_to_params(media_info: MediaInfo | None) -> dict[str, str]:
