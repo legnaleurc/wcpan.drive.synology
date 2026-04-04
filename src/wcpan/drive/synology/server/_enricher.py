@@ -101,6 +101,61 @@ def _node_cache_for_path_resolution_sync(
     return {nid: storage.get_node_by_id(nid) for nid in needed_ids}
 
 
+def enrich_subtree(
+    dsn: str,
+    folders: dict[str, str],
+    volume_map: dict[str, str],
+    root_node_id: str,
+    *,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    """Enrich width/height/ms_duration for image/video nodes under *root_node_id*.
+
+    Only processes nodes already in the DB that have width=height=0.
+    Does not emit change rows (same as backfill_media_metadata).
+    """
+    from ._virtual_ids import is_virtual
+
+    storage = Storage(dsn)
+    storage.ensure_schema()
+    subtree_ids = storage.collect_subtree_node_ids(root_node_id)
+
+    checked = updated = skipped = 0
+    for nid in subtree_ids:
+        if is_virtual(nid):
+            continue
+        record = storage.get_node_by_id(nid)
+        if record is None or record.is_directory:
+            continue
+        if not (record.is_image or record.is_video):
+            continue
+        if record.width != 0 or record.height != 0:
+            continue
+        checked += 1
+        node_cache = _node_cache_for_path_resolution_sync(record, storage)
+        local_path = resolve_local_path(record, node_cache, folders, volume_map)
+        if local_path is None or not local_path.exists():
+            skipped += 1
+            continue
+        result = _probe_sync(local_path)
+        if result is None or (result[0] == 0 and result[1] == 0):
+            skipped += 1
+            continue
+        w, h, ms = result
+        updated += 1
+        if not dry_run:
+            storage.upsert_node(
+                replace(
+                    record,
+                    width=w,
+                    height=h,
+                    ms_duration=ms if ms > 0 else record.ms_duration,
+                )
+            )
+
+    return {"checked": checked, "updated": updated, "skipped": skipped}
+
+
 def backfill_media_metadata(
     dsn: str,
     folders: dict[str, str],

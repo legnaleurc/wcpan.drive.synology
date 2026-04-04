@@ -14,7 +14,7 @@ from wcpan.drive.synology.server._db import (
     list_media_backfill_candidates,
     reset_change_history,
 )
-from wcpan.drive.synology.server._enricher import backfill_media_metadata
+from wcpan.drive.synology.server._enricher import backfill_media_metadata, enrich_subtree
 from wcpan.drive.synology.server._virtual_ids import SERVER_ROOT_ID, mount_id
 from wcpan.drive.synology.types import NodeRecord
 
@@ -249,6 +249,99 @@ class TestBackfillMediaMetadata(unittest.TestCase):
             assert updated is not None
             self.assertEqual(updated.width, 640)
             self.assertEqual(updated.height, 480)
+        finally:
+            os.unlink(db_path)
+            Path(local_root, "a.jpg").unlink(missing_ok=True)
+            os.rmdir(local_root)
+
+
+class TestEnrichSubtree(unittest.TestCase):
+    def _setup(self, db_path: str, local_root: str, *, width: int = 0) -> Storage:
+        storage = Storage(db_path)
+        storage.ensure_schema()
+        storage.bulk_upsert_nodes(
+            [
+                _make_node(SERVER_ROOT_ID, parent_id=None, name="", is_directory=True),
+                _make_node(
+                    mount_id("vol"), parent_id=SERVER_ROOT_ID, name="vol", is_directory=True
+                ),
+                _make_node(
+                    "file-1",
+                    parent_id=mount_id("vol"),
+                    name="a.jpg",
+                    is_image=True,
+                    width=width,
+                ),
+            ]
+        )
+        return storage
+
+    def test_updates_image_with_zero_dimensions(self) -> None:
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        local_root = tempfile.mkdtemp()
+        try:
+            Path(local_root, "a.jpg").touch()
+            storage = self._setup(db_path, local_root)
+            folders = {"vol": "/volume1/photos"}
+            volume_map = {"/volume1/photos": local_root}
+            with patch(
+                "wcpan.drive.synology.server._enricher._probe_sync",
+                return_value=(1920, 1080, 0),
+            ):
+                stats = enrich_subtree(db_path, folders, volume_map, mount_id("vol"))
+            self.assertEqual(stats["checked"], 1)
+            self.assertEqual(stats["updated"], 1)
+            self.assertEqual(stats["skipped"], 0)
+            node = storage.get_node_by_id("file-1")
+            assert node is not None
+            self.assertEqual(node.width, 1920)
+            self.assertEqual(node.height, 1080)
+        finally:
+            os.unlink(db_path)
+            Path(local_root, "a.jpg").unlink(missing_ok=True)
+            os.rmdir(local_root)
+
+    def test_skips_already_enriched(self) -> None:
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        local_root = tempfile.mkdtemp()
+        try:
+            Path(local_root, "a.jpg").touch()
+            storage = self._setup(db_path, local_root, width=50)
+            folders = {"vol": "/volume1/photos"}
+            volume_map = {"/volume1/photos": local_root}
+            stats = enrich_subtree(db_path, folders, volume_map, mount_id("vol"))
+            self.assertEqual(stats["checked"], 0)
+            self.assertEqual(stats["updated"], 0)
+            node = storage.get_node_by_id("file-1")
+            assert node is not None
+            self.assertEqual(node.width, 50)
+        finally:
+            os.unlink(db_path)
+            Path(local_root, "a.jpg").unlink(missing_ok=True)
+            os.rmdir(local_root)
+
+    def test_dry_run_does_not_write(self) -> None:
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        local_root = tempfile.mkdtemp()
+        try:
+            Path(local_root, "a.jpg").touch()
+            storage = self._setup(db_path, local_root)
+            folders = {"vol": "/volume1/photos"}
+            volume_map = {"/volume1/photos": local_root}
+            with patch(
+                "wcpan.drive.synology.server._enricher._probe_sync",
+                return_value=(800, 600, 0),
+            ):
+                stats = enrich_subtree(
+                    db_path, folders, volume_map, mount_id("vol"), dry_run=True
+                )
+            self.assertEqual(stats["updated"], 1)
+            node = storage.get_node_by_id("file-1")
+            assert node is not None
+            self.assertEqual(node.width, 0)
         finally:
             os.unlink(db_path)
             Path(local_root, "a.jpg").unlink(missing_ok=True)

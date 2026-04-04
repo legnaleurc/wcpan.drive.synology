@@ -13,8 +13,9 @@ from wcpan.logging import ConfigBuilder
 
 from ..types import ServerConfig
 from ._app import create_app
-from ._db import cleanup_dangling_nodes, reset_change_history
-from ._enricher import backfill_media_metadata
+from ._db import Storage, cleanup_dangling_nodes, reset_change_history
+from ._enricher import enrich_subtree
+from ._paths import virtual_path_to_directory_node_id
 from ._reconcile import async_api_backfill
 
 
@@ -39,8 +40,19 @@ def main() -> None:
     subparsers.add_parser(
         "gc", help="Remove dangling nodes unreachable from the server root"
     )
-    subparsers.add_parser(
-        "enrich", help="Backfill media metadata from local files (requires volume_map)"
+    enrich_p = subparsers.add_parser(
+        "enrich",
+        help="Enrich media metadata (width/height) from local files under PATH (requires volume_map)",
+    )
+    enrich_p.add_argument(
+        "path",
+        type=str,
+        help="Virtual directory path in the mirror (e.g. / for root, /photos/Projects)",
+    )
+    enrich_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change without writing the database",
     )
     backfill_p = subparsers.add_parser(
         "backfill",
@@ -88,12 +100,25 @@ def main() -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        count = backfill_media_metadata(
-            raw["database_url"],
-            dict(raw["folders"]),
-            dict(vm),
+        try:
+            storage = Storage(raw["database_url"])
+            storage.ensure_schema()
+            root_id = virtual_path_to_directory_node_id(storage, args.path.strip())
+            stats = enrich_subtree(
+                raw["database_url"],
+                dict(raw["folders"]),
+                dict(vm),
+                root_id,
+                dry_run=args.dry_run,
+            )
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            sys.exit(1)
+        print(
+            f"Checked {stats['checked']} node(s), "
+            f"updated {stats['updated']}, "
+            f"skipped {stats['skipped']}."
         )
-        print(f"Enriched {count} node(s).")
         return
 
     if args.command == "backfill":
@@ -111,8 +136,8 @@ def main() -> None:
             sys.exit(1)
         print(
             f"Checked {stats['checked']} node(s), "
+            f"added {stats['added']}, "
             f"updated {stats['updated']}, "
-            f"missing from API {stats['missing']}, "
             f"list errors {stats['list_errors']}."
         )
         return

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from dataclasses import replace
 
 from aiohttp import ClientSession
@@ -15,7 +14,7 @@ from ._auth import AuthManager
 from ._db import Storage
 from ._network import Network
 from ._paths import virtual_path_to_directory_node_id
-from ._virtual_ids import is_virtual
+from ._virtual_ids import SERVER_ROOT_ID
 
 
 _L = logging.getLogger(__name__)
@@ -55,61 +54,68 @@ async def reconcile_subtree(
     *,
     dry_run: bool = False,
 ) -> dict[str, int]:
-    """Compare API metadata to DB for all non-virtual nodes under *root_node_id*."""
-    subtree_ids = storage.collect_subtree_node_ids(root_node_id)
-    by_parent: dict[str, list[NodeRecord]] = defaultdict(list)
-    for nid in subtree_ids:
-        if is_virtual(nid):
-            continue
-        rec = storage.get_node_by_id(nid)
-        if rec is None or rec.parent_id is None:
-            continue
-        by_parent[rec.parent_id].append(rec)
+    """BFS-walk the API from root_node_id, adding missing nodes and updating changed ones.
 
-    checked = 0
-    updated = 0
-    missing = 0
-    list_errors = 0
+    For each folder visited, API children are compared against DB children:
+    - Missing from DB: inserted via upsert_node_and_emit_change.
+    - Present but metadata differs: updated, preserving width/height/ms_duration.
+    - Subdirectories are queued for recursive traversal.
 
-    for parent_id, rows in by_parent.items():
+    SERVER_ROOT_ID cannot be listed via the API; its DB children (mount nodes) are
+    used as the initial queue instead.
+    """
+    if root_node_id == SERVER_ROOT_ID:
+        queue = [c.node_id for c in storage.get_children(root_node_id)]
+    else:
+        queue = [root_node_id]
+
+    checked = added = updated = list_errors = 0
+
+    while queue:
+        parent_id = queue.pop(0)
         try:
             items = await list_children_for_parent(network, parent_id, folders)
         except Exception:
             _L.exception("Failed to list parent %r", parent_id)
             list_errors += 1
             continue
-        by_fid: dict[str, SynologyFileInfo] = {i["file_id"]: i for i in items}
-        for rec in rows:
+
+        db_by_id: dict[str, NodeRecord] = {
+            r.node_id: r for r in storage.get_children(parent_id)
+        }
+
+        for item in items:
             checked += 1
-            item = by_fid.get(rec.node_id)
-            if item is None:
-                missing += 1
-                _L.warning(
-                    "Node %r (%r) not in API listing for parent %r",
-                    rec.node_id,
-                    rec.name,
-                    parent_id,
-                )
-                continue
-            from_api = convert_file_info(item, parent_id=rec.parent_id)
-            candidate = replace(
-                from_api,
-                width=rec.width,
-                height=rec.height,
-                ms_duration=rec.ms_duration,
-            )
-            if not _api_fields_differ(rec, candidate):
-                continue
-            updated += 1
-            if dry_run:
-                _L.info("dry-run: would update %r (%r)", rec.node_id, rec.name)
+            fid = item["file_id"]
+            from_api = convert_file_info(item, parent_id=parent_id)
+            existing = db_by_id.get(fid)
+
+            if existing is None:
+                added += 1
+                _L.info("Adding missing node %r (%r) under %r", fid, item["name"], parent_id)
+                if not dry_run:
+                    storage.upsert_node_and_emit_change(from_api)
             else:
-                storage.upsert_node_and_emit_change(candidate)
+                candidate = replace(
+                    from_api,
+                    width=existing.width,
+                    height=existing.height,
+                    ms_duration=existing.ms_duration,
+                )
+                if _api_fields_differ(existing, candidate):
+                    updated += 1
+                    if dry_run:
+                        _L.info("dry-run: would update %r (%r)", fid, item["name"])
+                    else:
+                        storage.upsert_node_and_emit_change(candidate)
+
+            if item["type"] == "dir":
+                queue.append(fid)
 
     return {
         "checked": checked,
+        "added": added,
         "updated": updated,
-        "missing": missing,
         "list_errors": list_errors,
     }
 

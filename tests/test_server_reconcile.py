@@ -143,8 +143,6 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
             async def _list_children(
                 _nw: object, parent_id: str, _fd: dict[str, str]
             ) -> list[dict]:
-                if parent_id == mount_id("docs"):
-                    return [_syno_item("dir-1", "Projects", is_dir=True)]
                 if parent_id == "dir-1":
                     return [_syno_item("f-1", "x.txt", size=999)]
                 return []
@@ -157,8 +155,9 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
                     storage, network, folders, "dir-1", dry_run=False
                 )
 
+            self.assertEqual(stats["checked"], 1)
             self.assertEqual(stats["updated"], 1)
-            self.assertEqual(stats["checked"], 2)
+            self.assertEqual(stats["added"], 0)
             updated = storage.get_node_by_id("f-1")
             assert updated is not None
             self.assertEqual(updated.size, 999)
@@ -186,8 +185,6 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
             async def _list_children(
                 _nw: object, parent_id: str, _fd: dict[str, str]
             ) -> list[dict]:
-                if parent_id == mount_id("docs"):
-                    return [_syno_item("dir-1", "Projects", is_dir=True)]
                 if parent_id == "dir-1":
                     return [_syno_item("f-1", "x.txt", size=500)]
                 return []
@@ -204,5 +201,121 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
             updated = storage.get_node_by_id("f-1")
             assert updated is not None
             self.assertEqual(updated.size, 0)
+        finally:
+            os.unlink(db_path)
+
+    async def test_adds_missing_node(self) -> None:
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            storage = Storage(db_path)
+            storage.ensure_schema()
+            storage.bulk_upsert_nodes(
+                [
+                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                    _node(mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True),
+                    _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
+                ]
+            )
+            folders = {"docs": "/volume1/docs"}
+            network = MagicMock()
+
+            async def _list_children(
+                _nw: object, parent_id: str, _fd: dict[str, str]
+            ) -> list[dict]:
+                if parent_id == "dir-1":
+                    return [_syno_item("f-new", "new.txt", size=100)]
+                return []
+
+            with patch(
+                "wcpan.drive.synology.server._reconcile.list_children_for_parent",
+                side_effect=_list_children,
+            ):
+                stats = await reconcile_subtree(
+                    storage, network, folders, "dir-1", dry_run=False
+                )
+
+            self.assertEqual(stats["checked"], 1)
+            self.assertEqual(stats["added"], 1)
+            self.assertEqual(stats["updated"], 0)
+            added = storage.get_node_by_id("f-new")
+            self.assertIsNotNone(added)
+            assert added is not None
+            self.assertEqual(added.name, "new.txt")
+            self.assertEqual(added.parent_id, "dir-1")
+        finally:
+            os.unlink(db_path)
+
+    async def test_server_root_queues_mounts(self) -> None:
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            storage = Storage(db_path)
+            storage.ensure_schema()
+            storage.bulk_upsert_nodes(
+                [
+                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                    _node(mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True),
+                ]
+            )
+            folders = {"docs": "/volume1/docs"}
+            network = MagicMock()
+            listed: list[str] = []
+
+            async def _list_children(
+                _nw: object, parent_id: str, _fd: dict[str, str]
+            ) -> list[dict]:
+                listed.append(parent_id)
+                if parent_id == mount_id("docs"):
+                    return [_syno_item("f-1", "readme.txt")]
+                return []
+
+            with patch(
+                "wcpan.drive.synology.server._reconcile.list_children_for_parent",
+                side_effect=_list_children,
+            ):
+                stats = await reconcile_subtree(
+                    storage, network, folders, SERVER_ROOT_ID, dry_run=False
+                )
+
+            self.assertIn(mount_id("docs"), listed)
+            self.assertEqual(stats["checked"], 1)
+            self.assertEqual(stats["added"], 1)
+        finally:
+            os.unlink(db_path)
+
+    async def test_adds_missing_node_dry_run(self) -> None:
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            storage = Storage(db_path)
+            storage.ensure_schema()
+            storage.bulk_upsert_nodes(
+                [
+                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                    _node(mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True),
+                    _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
+                ]
+            )
+            folders = {"docs": "/volume1/docs"}
+            network = MagicMock()
+
+            async def _list_children(
+                _nw: object, parent_id: str, _fd: dict[str, str]
+            ) -> list[dict]:
+                if parent_id == "dir-1":
+                    return [_syno_item("f-new", "new.txt")]
+                return []
+
+            with patch(
+                "wcpan.drive.synology.server._reconcile.list_children_for_parent",
+                side_effect=_list_children,
+            ):
+                stats = await reconcile_subtree(
+                    storage, network, folders, "dir-1", dry_run=True
+                )
+
+            self.assertEqual(stats["added"], 1)
+            self.assertIsNone(storage.get_node_by_id("f-new"))
         finally:
             os.unlink(db_path)
