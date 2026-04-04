@@ -7,8 +7,10 @@ from contextlib import asynccontextmanager, suppress
 from typing import Any, override
 
 from aiohttp import ClientSession
+from wcpan.drive.core.exceptions import NodeExistsError
 from wcpan.drive.core.types import MediaInfo, Node, WritableFile
 
+from ..exceptions import SynologyUploadConflictError, SynologyUploadError
 from ..lib import node_from_record, node_record_from_dict
 
 
@@ -112,6 +114,13 @@ async def _upload_stream(
         params["mime_type"] = mime_type
     params.update(_media_info_to_params(media_info))
     async with session.post(url, data=data, params=params) as response:
+        if response.status == 409:
+            raise NodeExistsError(name)
+        if response.status == 503:
+            raise SynologyUploadError(
+                f"Upload failed for {name!r}: Synology returned transient error",
+                file_name=name,
+            )
         response.raise_for_status()
         result = await response.json()
     return node_from_record(node_record_from_dict(result))

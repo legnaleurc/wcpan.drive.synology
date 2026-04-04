@@ -7,6 +7,7 @@ from typing import Any, NotRequired, TypedDict
 
 from aiohttp import ClientResponse
 
+from ...exceptions import SynologyUploadConflictError, SynologyUploadError
 from .._network import Network
 from .._virtual_ids import mount_name
 
@@ -310,7 +311,17 @@ async def upload_file(
         result = await response.json(content_type=None)
 
     if not result.get("success", True):
-        raise Exception(f"Upload failed for {name!r}: {result}")
+        error = result.get("error", {})
+        code = error.get("code")
+        if code == 1022:
+            raise SynologyUploadConflictError(
+                f"Upload conflict for {name!r}: file already exists at destination",
+                file_name=name,
+            )
+        raise SynologyUploadError(
+            f"Upload failed for {name!r}: {result}",
+            file_name=name,
+        )
 
     return result["data"]
 

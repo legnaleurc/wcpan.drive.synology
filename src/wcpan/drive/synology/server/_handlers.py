@@ -8,7 +8,11 @@ from logging import getLogger
 from aiohttp import web
 from aiohttp.client_exceptions import ClientConnectionResetError
 
-from ..exceptions import SynologyNetworkError
+from ..exceptions import (
+    SynologyNetworkError,
+    SynologyUploadConflictError,
+    SynologyUploadError,
+)
 from ..lib import (
     guess_mime_type,
     node_record_to_dict,
@@ -385,13 +389,18 @@ async def upload_node(request: web.Request) -> web.Response:
     mime_type = request.rel_url.query.get("mime_type") or None
     parent_ref = synology_parent_ref(parent_id, folders)
 
-    upload_info = await synology_files.upload_file(
-        network=network,
-        parent_ref=parent_ref,
-        name=name,
-        data=request.content.iter_chunked(_CHUNK_SIZE),
-        mime_type=mime_type,
-    )
+    try:
+        upload_info = await synology_files.upload_file(
+            network=network,
+            parent_ref=parent_ref,
+            name=name,
+            data=request.content.iter_chunked(_CHUNK_SIZE),
+            mime_type=mime_type,
+        )
+    except SynologyUploadConflictError as e:
+        raise web.HTTPConflict(reason=str(e))
+    except SynologyUploadError as e:
+        raise web.HTTPServiceUnavailable(reason=str(e))
     info = synology_files.synology_file_info_from_api_dict(upload_info)
 
     record = await _enrich_and_upsert_synology_node(
