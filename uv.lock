@@ -514,7 +514,7 @@ wheels = [
 
 [[package]]
 name = "wcpan-drive-synology"
-version = "2.0.0a5"
+version = "2.0.0a6"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
