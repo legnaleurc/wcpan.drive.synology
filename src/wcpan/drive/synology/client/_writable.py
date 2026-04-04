@@ -7,7 +7,8 @@ from contextlib import asynccontextmanager, suppress
 from logging import getLogger
 from typing import override
 
-from aiohttp import ClientSession
+import aiohttp
+from aiohttp import ClientSession, ClientTimeout
 from wcpan.drive.core.exceptions import NodeExistsError
 from wcpan.drive.core.types import MediaInfo, Node, WritableFile
 
@@ -20,6 +21,7 @@ _L = getLogger(__name__)
 _MAX_SPOOL = 64 * 1024 * 1024   # 64 MiB before spilling to disk
 _MAX_RETRIES = 5
 _CHUNK_SIZE = 4 * 1024 * 1024   # 4 MiB upload chunks
+_CHUNK_TIMEOUT = ClientTimeout(total=5 * 60)  # 5 min per chunk; stalled → retry
 
 
 def _media_info_to_params(media_info: MediaInfo | None) -> dict[str, str]:
@@ -278,7 +280,9 @@ class _ResumableWritableFile(WritableFile):
 
     async def _query_received(self) -> int:
         url = f"{self._server_url}/api/v1/upload-sessions/{self._session_id}"
-        async with self._session.get(url) as response:
+        async with self._session.get(
+            url, timeout=ClientTimeout(total=30)
+        ) as response:
             if response.status == 404:
                 return 0
             response.raise_for_status()
@@ -299,7 +303,7 @@ class _ResumableWritableFile(WritableFile):
             }
             url = f"{self._server_url}/api/v1/upload-sessions/{self._session_id}"
             async with self._session.put(
-                url, data=chunk, headers=headers
+                url, data=chunk, headers=headers, timeout=_CHUNK_TIMEOUT
             ) as response:
                 if response.status == 409:
                     body = await response.json()
