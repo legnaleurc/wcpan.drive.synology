@@ -154,14 +154,21 @@ async def _scan_subtree_bfs(
         folder_id, this_max_id, force_scan = queue.pop(0)
 
         if not force_scan and last_max_id > 0 and this_max_id <= last_max_id:
+            db_children = await off_main(storage.get_children, folder_id)
+            if db_children:
+                _L.debug(
+                    "Skipping folder %s (max_id=%d <= last_max_id=%d)",
+                    folder_id,
+                    this_max_id,
+                    last_max_id,
+                )
+                acc.subtree_preserve_roots.add(folder_id)
+                continue
             _L.debug(
-                "Skipping folder %s (max_id=%d <= last_max_id=%d)",
+                "Force-entering folder %s: in DB but no children (max_id=%d)",
                 folder_id,
                 this_max_id,
-                last_max_id,
             )
-            acc.subtree_preserve_roots.add(folder_id)
-            continue
 
         _L.debug("Entering folder %s (max_id=%d)", folder_id, this_max_id)
         try:
