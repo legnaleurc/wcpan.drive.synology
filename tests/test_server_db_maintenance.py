@@ -14,7 +14,10 @@ from wcpan.drive.synology.server._db import (
     list_media_backfill_candidates,
     reset_change_history,
 )
-from wcpan.drive.synology.server._enricher import backfill_media_metadata, enrich_subtree
+from wcpan.drive.synology.server._enricher import (
+    backfill_media_metadata,
+    enrich_subtree,
+)
 from wcpan.drive.synology.server._virtual_ids import SERVER_ROOT_ID, mount_id
 from wcpan.drive.synology.types import NodeRecord
 
@@ -263,7 +266,10 @@ class TestEnrichSubtree(unittest.TestCase):
             [
                 _make_node(SERVER_ROOT_ID, parent_id=None, name="", is_directory=True),
                 _make_node(
-                    mount_id("vol"), parent_id=SERVER_ROOT_ID, name="vol", is_directory=True
+                    mount_id("vol"),
+                    parent_id=SERVER_ROOT_ID,
+                    name="vol",
+                    is_directory=True,
                 ),
                 _make_node(
                     "file-1",

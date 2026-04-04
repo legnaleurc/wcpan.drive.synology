@@ -18,9 +18,9 @@ from ..lib import node_from_record, node_record_from_dict
 
 _L = getLogger(__name__)
 
-_MAX_SPOOL = 64 * 1024 * 1024   # 64 MiB before spilling to disk
+_MAX_SPOOL = 64 * 1024 * 1024  # 64 MiB before spilling to disk
 _MAX_RETRIES = 5
-_CHUNK_SIZE = 4 * 1024 * 1024   # 4 MiB upload chunks
+_CHUNK_SIZE = 4 * 1024 * 1024  # 4 MiB upload chunks
 _CHUNK_TIMEOUT = ClientTimeout(sock_read=5 * 60)  # 5 min without data → retry
 
 
@@ -63,7 +63,9 @@ async def create_writable(
             session, server_url, parent_id, name, size, mime_type, media_info
         )
         with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="b") as buf:
-            writable = _ResumableWritableFile(session, server_url, session_id, size, name, buf)
+            writable = _ResumableWritableFile(
+                session, server_url, session_id, size, name, buf
+            )
             try:
                 yield writable
                 await writable.flush()
@@ -280,9 +282,7 @@ class _ResumableWritableFile(WritableFile):
 
     async def _query_received(self) -> int:
         url = f"{self._server_url}/api/v1/upload-sessions/{self._session_id}"
-        async with self._session.get(
-            url, timeout=ClientTimeout(total=30)
-        ) as response:
+        async with self._session.get(url, timeout=ClientTimeout(total=30)) as response:
             if response.status == 404:
                 return 0
             response.raise_for_status()

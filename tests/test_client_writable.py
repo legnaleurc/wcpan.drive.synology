@@ -63,13 +63,9 @@ def _make_session(
         return_value=_response_cm(200, {"received": 0, "total": total_size})
     )
     # PUT /upload-sessions/{id} → 201 with node (successful upload)
-    session.put = MagicMock(
-        return_value=_response_cm(201, _node_dict())
-    )
+    session.put = MagicMock(return_value=_response_cm(201, _node_dict()))
     # DELETE /upload-sessions/{id} → 204
-    session.delete = MagicMock(
-        return_value=_response_cm(204, {})
-    )
+    session.delete = MagicMock(return_value=_response_cm(204, {}))
     return session
 
 
@@ -84,7 +80,9 @@ def _make_writable(
 ) -> _ResumableWritableFile:
     if buf is None:
         buf = tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="b")
-    return _ResumableWritableFile(client, "http://srv", session_id, total_size, "f.bin", buf)
+    return _ResumableWritableFile(
+        client, "http://srv", session_id, total_size, "f.bin", buf
+    )
 
 
 class TestResumableWritableFileFlush(IsolatedAsyncioTestCase):
@@ -234,9 +232,7 @@ class TestResumableWritableFileRetry(IsolatedAsyncioTestCase):
 
         total = 50
         client = _make_session("sid-maxretry", total_size=total)
-        client.put = MagicMock(
-            return_value=_cm_raises(aiohttp.ClientError("drop"))
-        )
+        client.put = MagicMock(return_value=_cm_raises(aiohttp.ClientError("drop")))
         client.get = MagicMock(
             return_value=_response_cm(200, {"received": 0, "total": total})
         )

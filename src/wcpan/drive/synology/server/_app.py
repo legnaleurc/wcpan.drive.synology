@@ -3,10 +3,10 @@
 import asyncio
 import secrets
 from collections.abc import AsyncGenerator, Coroutine, Generator
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from logging import getLogger
+from pathlib import Path
 
 from aiohttp import ClientSession, web
 
@@ -199,7 +199,9 @@ def _add_routes(app: web.Application) -> None:
     app.router.add_patch("/api/v1/nodes/{id}", update_node)
     app.router.add_delete("/api/v1/nodes/{id}", delete_node)
     app.router.add_post("/api/v1/nodes/{parent_id}/upload", upload_node)
-    app.router.add_post("/api/v1/nodes/{parent_id}/upload-session", create_upload_session)
+    app.router.add_post(
+        "/api/v1/nodes/{parent_id}/upload-session", create_upload_session
+    )
     app.router.add_put("/api/v1/upload-sessions/{session_id}", put_upload_chunk)
     app.router.add_get("/api/v1/upload-sessions/{session_id}", get_upload_session)
     app.router.add_delete("/api/v1/upload-sessions/{session_id}", delete_upload_session)

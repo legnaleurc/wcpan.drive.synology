@@ -92,7 +92,9 @@ async def reconcile_subtree(
 
             if existing is None:
                 added += 1
-                _L.info("Adding missing node %r (%r) under %r", fid, item["name"], parent_id)
+                _L.info(
+                    "Adding missing node %r (%r) under %r", fid, item["name"], parent_id
+                )
                 if not dry_run:
                     storage.upsert_node_and_emit_change(from_api)
             else:

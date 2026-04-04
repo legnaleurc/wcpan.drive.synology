@@ -18,9 +18,7 @@ class UploadSession:
     client_query: dict[str, str]
     temp_path: Path
     received: int = 0
-    lock: asyncio.Lock = field(
-        default_factory=asyncio.Lock, repr=False, compare=False
-    )
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
 
 
 class UploadSessionStore:

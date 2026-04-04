@@ -80,6 +80,7 @@ class TestCreateUploadSession(IsolatedAsyncioTestCase):
         self.assertEqual(resp.status, 201)
         body = resp.body  # type: ignore[attr-defined]
         import json
+
         data = json.loads(body)
         self.assertIn("session_id", data)
         self.assertEqual(data["received"], 0)
@@ -123,6 +124,7 @@ class TestCreateUploadSession(IsolatedAsyncioTestCase):
 
     async def test_virtual_root_raises_403(self):
         from wcpan.drive.synology.server._virtual_ids import SERVER_ROOT_ID
+
         req = _make_request(
             match_info={"parent_id": SERVER_ROOT_ID},
             query={"name": "file.bin", "size": "1024"},
@@ -137,6 +139,7 @@ class TestCreateUploadSession(IsolatedAsyncioTestCase):
         )
         resp = await create_upload_session(req)
         import json
+
         data = json.loads(resp.body)  # type: ignore[attr-defined]
         store: UploadSessionStore = req.app[upload_sessions_key]
         session = store.get(data["session_id"])
@@ -163,6 +166,7 @@ class TestGetUploadSession(IsolatedAsyncioTestCase):
         resp = await get_upload_session(req)
         self.assertEqual(resp.status, 200)
         import json
+
         data = json.loads(resp.body)  # type: ignore[attr-defined]
         self.assertEqual(data["received"], 512)
         self.assertEqual(data["total"], 2048)
@@ -218,6 +222,7 @@ class TestPutUploadChunk(IsolatedAsyncioTestCase):
         resp = await put_upload_chunk(req)
 
         import json
+
         data = json.loads(resp.body)  # type: ignore[attr-defined]
         self.assertEqual(resp.status, 200)
         self.assertEqual(data["received"], 100)
@@ -238,6 +243,7 @@ class TestPutUploadChunk(IsolatedAsyncioTestCase):
         resp = await put_upload_chunk(req)
 
         import json
+
         data = json.loads(resp.body)  # type: ignore[attr-defined]
         self.assertEqual(resp.status, 409)
         self.assertEqual(data["received"], 50)
@@ -293,6 +299,7 @@ class TestPutUploadChunk(IsolatedAsyncioTestCase):
 
     async def test_final_chunk_triggers_synology_upload(self):
         from datetime import UTC, datetime
+
         from wcpan.drive.synology.types import NodeRecord
 
         store = UploadSessionStore()

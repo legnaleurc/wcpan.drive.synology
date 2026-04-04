@@ -642,9 +642,7 @@ async def put_upload_chunk(request: web.Request) -> web.Response:
         # If all bytes are already on disk, skip the write and go straight to finalise.
         if session.received < session.total_size:
             if start != session.received:
-                return web.json_response(
-                    {"received": session.received}, status=409
-                )
+                return web.json_response({"received": session.received}, status=409)
 
             data = await request.read()
             expected_len = end - start + 1
