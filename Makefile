@@ -1,5 +1,6 @@
 RM := rm -rf
 PYTHON := uv run python3
+PYRIGHT := uv run pyright
 RUFF := uv run ruff
 
 PKG_FILES := pyproject.toml
@@ -27,6 +28,7 @@ purge: clean
 
 test: venv
 	$(PYTHON) -m compileall src/wcpan
+	$(PYRIGHT)
 	$(PYTHON) -m unittest
 
 coverage: venv
