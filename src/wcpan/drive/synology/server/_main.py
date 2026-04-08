@@ -31,7 +31,7 @@ def main() -> None:
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Log level for the serve command (default: INFO)",
+        help="Log level (default: INFO)",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("serve", help="Run the Synology mirror server")
@@ -76,8 +76,15 @@ def main() -> None:
         print(f"Reset change history: {count} update record(s) written.")
         return
 
+    config = _server_config_from_raw(raw)
+    dictConfig(
+        ConfigBuilder(path=config.log_path)
+        .add("wcpan.drive.synology", level=args.log_level)
+        .add("aiohttp")
+        .to_dict()
+    )
+
     if args.command == "backfill":
-        config = _server_config_from_raw(raw)
         vm = raw.get("volume_map")
         try:
             stats = asyncio.run(
@@ -95,17 +102,10 @@ def main() -> None:
             f"Checked {stats['checked']} node(s), "
             f"added {stats['added']}, "
             f"updated {stats['updated']}, "
+            f"removed {stats['removed']}, "
             f"list errors {stats['list_errors']}."
         )
         return
-
-    config = _server_config_from_raw(raw)
-    dictConfig(
-        ConfigBuilder(path=config.log_path)
-        .add("wcpan.drive.synology", level=args.log_level)
-        .add("aiohttp")
-        .to_dict()
-    )
 
     app = create_app(config)
     _L.info("listening on %s:%s", config.host, config.port)
