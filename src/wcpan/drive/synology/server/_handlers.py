@@ -482,7 +482,7 @@ async def handle_synology_webhook(request: web.Request) -> web.Response:
             continue
 
         try:
-            if event_type == "file_deleted":
+            if event_type == "file_removed":
                 await enqueue_write(
                     wq, partial(storage.delete_subtree_and_emit_changes, file_id)
                 )
