@@ -1,0 +1,122 @@
+"""Shared utilities for handler modules."""
+
+import functools
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
+from typing import Any
+
+from aiohttp import web
+from wcpan.drive.core.types import MediaInfo
+
+from ..._lib import node_record_to_dict
+from ...types import NodeRecord
+from ..api.types import SynologyFileInfo
+from ..keys import (
+    CHANGE_SERVICE_KEY,
+    NETWORK_KEY,
+    READY_KEY,
+    SYNOLOGY_PATH_KEY,
+)
+from ..lib.nodes import convert_file_info
+from ..services.sync import NodeSyncService
+
+
+_MEDIA_QUERY_KEYS = ("width", "height", "ms_duration", "media_image", "media_video")
+
+
+def media_info_from_query(q: Mapping[str, str]) -> MediaInfo | None:
+    if not any(k in q for k in _MEDIA_QUERY_KEYS):
+        return None
+    return MediaInfo(
+        width=int(q.get("width", 0)),
+        height=int(q.get("height", 0)),
+        ms_duration=int(q.get("ms_duration", 0)),
+        is_image=q.get("media_image", "") in ("1", "true"),
+        is_video=q.get("media_video", "") in ("1", "true"),
+    )
+
+
+def record_to_response(record: NodeRecord) -> dict[str, Any]:
+    return node_record_to_dict(record)
+
+
+def require_ready(
+    handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+) -> Callable[[web.Request], Awaitable[web.StreamResponse]]:
+    @functools.wraps(handler)
+    async def wrapper(request: web.Request) -> web.StreamResponse:
+        if not request.app[READY_KEY]:
+            raise web.HTTPServiceUnavailable(reason="Server not ready")
+        return await handler(request)
+
+    return wrapper
+
+
+async def enrich_and_upsert_synology_node(
+    *,
+    info: SynologyFileInfo,
+    parent_id: str,
+    node_sync: NodeSyncService,
+    media_info: MediaInfo | None = None,
+) -> NodeRecord:
+    record = convert_file_info(info, parent_id)
+    if media_info is not None:
+        record = replace(
+            record,
+            is_image=media_info.is_image,
+            is_video=media_info.is_video,
+            width=media_info.width,
+            height=media_info.height,
+            ms_duration=media_info.ms_duration,
+        )
+    return await node_sync.upsert(record)
+
+
+async def resolve_name_conflict_and_upsert(
+    *,
+    request: web.Request,
+    parent_id: str,
+    name: str,
+    prefer_directory: bool | None,
+    media_info: MediaInfo | None,
+) -> NodeRecord:
+    """List Synology children and upsert the matching node (409 conflict recovery)."""
+    node_sync = request.app[CHANGE_SERVICE_KEY]
+    network = request.app[NETWORK_KEY]
+    syno_paths = request.app[SYNOLOGY_PATH_KEY]
+
+    info: SynologyFileInfo | None = None
+    if prefer_directory is True:
+        info = await syno_paths.find_child_by_name(
+            network, parent_id, name, is_directory=True
+        )
+        if info is None:
+            info = await syno_paths.find_child_by_name(
+                network, parent_id, name, is_directory=None
+            )
+    elif prefer_directory is False:
+        info = await syno_paths.find_child_by_name(
+            network, parent_id, name, is_directory=False
+        )
+        if info is None:
+            info = await syno_paths.find_child_by_name(
+                network, parent_id, name, is_directory=None
+            )
+    else:
+        info = await syno_paths.find_child_by_name(
+            network, parent_id, name, is_directory=None
+        )
+
+    if info is None:
+        raise web.HTTPConflict(
+            reason=(
+                f"Name conflict for {name!r} but existing node could not be resolved"
+            )
+        )
+
+    return await enrich_and_upsert_synology_node(
+        info=info,
+        parent_id=parent_id,
+        node_sync=node_sync,
+        media_info=media_info,
+    )

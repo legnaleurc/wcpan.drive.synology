@@ -32,7 +32,8 @@ async with create_service(server_url="http://localhost:8080") as file_service:
 ### Server
 
 The server mirrors a Synology Drive instance locally via a REST API and
-webhook. Configure it with a YAML file (see `server.example.yaml`):
+webhook-driven update pipeline. Configure it with a YAML file (see
+`server.example.yaml`):
 
 ```bash
 # Copy and edit the example config
@@ -50,18 +51,23 @@ wcpan.drive.synology --config server.yaml squash
 #### Config file
 
 ```yaml
+version: 1
 host: "0.0.0.0"
 port: 8080
 database_url: "sqlite:////data/mirror.db"
 synology_url: "https://nas.example.com:5001"
 username: "your-drive-user"
 password: "your-password"
-folders:
+mounts:
   photos: "/volume1/photos"
+local_paths: {}
 public_url: "https://my-server.example.com"
 ```
 
-See `server.example.yaml` for the full set of options.
+`version` is the config schema version and must match the version supported by
+the current binary. `local_paths` is currently required by the config schema;
+use `{}` when local media probing is not needed. See `server.example.yaml` for
+the full set of options.
 
 ## Requirements
 

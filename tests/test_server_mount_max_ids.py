@@ -1,126 +1,149 @@
-"""Tests for per-mount max_id tracking in Storage."""
+"""Tests for mount max_id tracking and DB schema versioning."""
 
 import os
 import sqlite3
 import tempfile
-import unittest
+from concurrent.futures import ThreadPoolExecutor
+from unittest import IsolatedAsyncioTestCase
 
-from wcpan.drive.synology.server._db import Storage
+from wcpan.drive.synology._server.services.off_main import OffMainThreadService
+from wcpan.drive.synology._server.services.storage import (
+    SchemaVersionError,
+    StorageService,
+)
 
 
-class TestGetMountMaxIds(unittest.TestCase):
-    def setUp(self) -> None:
+class TestGetMountMaxIds(IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
         fd, self.db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
-        self.storage = Storage(self.db_path)
-        self.storage.ensure_schema()
+        self.pool = ThreadPoolExecutor()
+        self.storage = StorageService(self.db_path, OffMainThreadService(self.pool))
+        await self.storage.ensure_schema()
 
-    def tearDown(self) -> None:
+    async def asyncTearDown(self) -> None:
+        self.pool.shutdown(wait=False, cancel_futures=True)
         os.unlink(self.db_path)
 
-    def _write_kv(self, key: str, value: str) -> None:
+    def _write_mount(self, name: str, max_id: int, path: str) -> None:
         con = sqlite3.connect(self.db_path)
         con.execute(
-            "INSERT INTO server_state (key, value) VALUES (?, ?)"
-            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
+            "INSERT INTO mounts (name, max_id, path) VALUES (?, ?, ?)"
+            " ON CONFLICT(name) DO UPDATE SET"
+            " max_id = excluded.max_id,"
+            " path = excluded.path",
+            (name, max_id, path),
         )
         con.commit()
         con.close()
 
-    def _read_kv(self, key: str) -> str | None:
-        con = sqlite3.connect(self.db_path)
-        row = con.execute(
-            "SELECT value FROM server_state WHERE key = ?", (key,)
-        ).fetchone()
-        con.close()
-        return row[0] if row else None
-
-    def test_fresh_db_returns_zero_for_all_mounts(self) -> None:
-        folders = {"LV": "/team-folders/video/L", "LG": "/team-folders/gallery/L"}
-        result = self.storage.get_mount_max_ids(folders)
+    async def test_fresh_db_returns_zero_for_all_mounts(self) -> None:
+        mounts = {"LV": "/team-folders/video/L", "LG": "/team-folders/gallery/L"}
+        result = await self.storage.get_mount_max_ids(mounts)
         self.assertEqual(result, {"LV": 0, "LG": 0})
 
-    def test_migration_from_global_key(self) -> None:
-        """Old global last_max_id is used for all mounts when no per-mount keys exist."""
-        self._write_kv("last_max_id", "59172")
-        folders = {"LV": "/team-folders/video/L", "LG": "/team-folders/gallery/L"}
-        result = self.storage.get_mount_max_ids(folders)
-        self.assertEqual(result, {"LV": 59172, "LG": 59172})
+    async def test_unknown_mount_gets_zero(self) -> None:
+        self._write_mount("LV", 35000, "/team-folders/video/L")
+        mounts = {"LV": "/team-folders/video/L", "LG": "/team-folders/gallery/L"}
+        result = await self.storage.get_mount_max_ids(mounts)
+        self.assertEqual(result, {"LV": 35000, "LG": 0})
 
-    def test_per_mount_keys_take_precedence_over_global(self) -> None:
-        self._write_kv("last_max_id", "59172")
-        self._write_kv("last_max_id:LV", "35000")
-        self._write_kv("last_max_id:LG", "28000")
-        folders = {"LV": "/team-folders/video/L", "LG": "/team-folders/gallery/L"}
-        result = self.storage.get_mount_max_ids(folders)
-        self.assertEqual(result, {"LV": 35000, "LG": 28000})
-
-    def test_new_mount_gets_zero_when_other_mounts_have_per_mount_keys(self) -> None:
-        """A new mount added to config gets 0, not the global fallback."""
-        self._write_kv("last_max_id", "59172")
-        self._write_kv("last_max_id:LV", "35000")
-        # LG has no per-mount key; since LV has one, global fallback is NOT used
-        folders = {"LV": "/team-folders/video/L", "LG": "/team-folders/gallery/L"}
-        result = self.storage.get_mount_max_ids(folders)
-        self.assertEqual(result["LV"], 35000)
-        self.assertEqual(result["LG"], 0)
-
-    def test_path_change_resets_to_zero(self) -> None:
-        """If the stored syno_path differs from config, that mount resets to 0."""
-        self._write_kv("last_max_id:LV", "35000")
-        self._write_kv("mount_path:LV", "/old/path")
-        folders = {"LV": "/new/path"}
-        result = self.storage.get_mount_max_ids(folders)
+    async def test_path_change_resets_to_zero(self) -> None:
+        self._write_mount("LV", 35000, "/old/path")
+        mounts = {"LV": "/new/path"}
+        result = await self.storage.get_mount_max_ids(mounts)
         self.assertEqual(result["LV"], 0)
 
-    def test_matching_path_preserves_value(self) -> None:
-        self._write_kv("last_max_id:LV", "35000")
-        self._write_kv("mount_path:LV", "/team-folders/video/L")
-        folders = {"LV": "/team-folders/video/L"}
-        result = self.storage.get_mount_max_ids(folders)
-        self.assertEqual(result["LV"], 35000)
-
-    def test_no_stored_path_does_not_reset(self) -> None:
-        """Missing mount_path key (e.g. first write after upgrade) does not reset."""
-        self._write_kv("last_max_id:LV", "35000")
-        # No mount_path:LV written
-        folders = {"LV": "/team-folders/video/L"}
-        result = self.storage.get_mount_max_ids(folders)
+    async def test_matching_path_preserves_value(self) -> None:
+        self._write_mount("LV", 35000, "/team-folders/video/L")
+        mounts = {"LV": "/team-folders/video/L"}
+        result = await self.storage.get_mount_max_ids(mounts)
         self.assertEqual(result["LV"], 35000)
 
 
-class TestSetMountState(unittest.TestCase):
-    def setUp(self) -> None:
+class TestSetMountState(IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
         fd, self.db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
-        self.storage = Storage(self.db_path)
-        self.storage.ensure_schema()
+        self.pool = ThreadPoolExecutor()
+        self.storage = StorageService(self.db_path, OffMainThreadService(self.pool))
+        await self.storage.ensure_schema()
 
-    def tearDown(self) -> None:
+    async def asyncTearDown(self) -> None:
+        self.pool.shutdown(wait=False, cancel_futures=True)
         os.unlink(self.db_path)
 
-    def _read_kv(self, key: str) -> str | None:
+    def _read_mount(self, name: str) -> tuple[int, str] | None:
         con = sqlite3.connect(self.db_path)
         row = con.execute(
-            "SELECT value FROM server_state WHERE key = ?", (key,)
+            "SELECT max_id, path FROM mounts WHERE name = ?", (name,)
         ).fetchone()
         con.close()
-        return row[0] if row else None
+        if row is None:
+            return None
+        return int(row[0]), str(row[1])
 
-    def test_writes_both_keys(self) -> None:
-        self.storage.set_mount_state("LV", "/team-folders/video/L", 35000)
-        self.assertEqual(self._read_kv("last_max_id:LV"), "35000")
-        self.assertEqual(self._read_kv("mount_path:LV"), "/team-folders/video/L")
+    async def test_writes_mount_row(self) -> None:
+        await self.storage.set_mount_state("LV", "/team-folders/video/L", 35000)
+        self.assertEqual(
+            self._read_mount("LV"),
+            (35000, "/team-folders/video/L"),
+        )
 
-    def test_overwrites_existing_values(self) -> None:
-        self.storage.set_mount_state("LV", "/old/path", 1000)
-        self.storage.set_mount_state("LV", "/team-folders/video/L", 35000)
-        self.assertEqual(self._read_kv("last_max_id:LV"), "35000")
-        self.assertEqual(self._read_kv("mount_path:LV"), "/team-folders/video/L")
+    async def test_overwrites_existing_values(self) -> None:
+        await self.storage.set_mount_state("LV", "/old/path", 1000)
+        await self.storage.set_mount_state("LV", "/team-folders/video/L", 35000)
+        self.assertEqual(
+            self._read_mount("LV"),
+            (35000, "/team-folders/video/L"),
+        )
 
-    def test_roundtrip_via_get_mount_max_ids(self) -> None:
-        folders = {"LV": "/team-folders/video/L"}
-        self.storage.set_mount_state("LV", "/team-folders/video/L", 35000)
-        result = self.storage.get_mount_max_ids(folders)
+    async def test_roundtrip_via_get_mount_max_ids(self) -> None:
+        mounts = {"LV": "/team-folders/video/L"}
+        await self.storage.set_mount_state("LV", "/team-folders/video/L", 35000)
+        result = await self.storage.get_mount_max_ids(mounts)
         self.assertEqual(result, {"LV": 35000})
+
+
+class TestEnsureSchemaVersion(IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        fd, self.db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        self.pool = ThreadPoolExecutor()
+        self.off_main = OffMainThreadService(self.pool)
+
+    async def asyncTearDown(self) -> None:
+        self.pool.shutdown(wait=False, cancel_futures=True)
+        os.unlink(self.db_path)
+
+    async def test_new_db_sets_user_version(self) -> None:
+        await StorageService(self.db_path, self.off_main).ensure_schema()
+
+        con = sqlite3.connect(self.db_path)
+        version = con.execute("PRAGMA user_version").fetchone()[0]
+        con.close()
+
+        self.assertEqual(version, 1)
+
+    async def test_existing_db_with_matching_version_is_accepted(self) -> None:
+        storage = StorageService(self.db_path, self.off_main)
+        await storage.ensure_schema()
+        await storage.ensure_schema()
+
+    async def test_existing_unversioned_db_is_rejected(self) -> None:
+        con = sqlite3.connect(self.db_path)
+        con.execute("CREATE TABLE legacy (id INTEGER PRIMARY KEY)")
+        con.commit()
+        con.close()
+
+        with self.assertRaises(SchemaVersionError):
+            await StorageService(self.db_path, self.off_main).ensure_schema()
+
+    async def test_existing_db_with_wrong_version_is_rejected(self) -> None:
+        con = sqlite3.connect(self.db_path)
+        con.execute("PRAGMA user_version = 99")
+        con.commit()
+        con.close()
+
+        with self.assertRaises(SchemaVersionError):
+            await StorageService(self.db_path, self.off_main).ensure_schema()

@@ -1,15 +1,15 @@
-"""Tests for OffMainThread executor bridge."""
+"""Tests for OffMainThreadService executor bridge."""
 
 from concurrent.futures import ThreadPoolExecutor
 from unittest import IsolatedAsyncioTestCase
 
-from wcpan.drive.synology.server._lib import OffMainThread
+from wcpan.drive.synology._server.services.off_main import OffMainThreadService
 
 
-class TestOffMainThread(IsolatedAsyncioTestCase):
+class TestOffMainThreadService(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._pool = ThreadPoolExecutor(max_workers=2)
-        self._off = OffMainThread(self._pool)
+        self._off = OffMainThreadService(self._pool)
 
     async def asyncTearDown(self) -> None:
         self._pool.shutdown(wait=True)

@@ -4,7 +4,7 @@ from unittest import IsolatedAsyncioTestCase
 
 from Crypto.Hash import MD4
 
-from wcpan.drive.synology.client._hasher import Md4Hasher, create_hasher
+from wcpan.drive.synology._client.hasher import Md4Hasher, create_hasher
 
 
 class TestCreateHasher(IsolatedAsyncioTestCase):

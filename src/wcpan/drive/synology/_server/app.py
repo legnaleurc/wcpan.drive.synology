@@ -1,0 +1,275 @@
+"""aiohttp application factory, routes, and startup/shutdown lifecycle."""
+
+import asyncio
+from collections.abc import AsyncGenerator, Coroutine, Generator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from logging import getLogger
+from pathlib import Path
+
+from aiohttp import web
+
+from .api.webhooks import create_webhook, delete_webhook, list_webhooks
+from .handlers.changes import get_changes, get_cursor, get_root
+from .handlers.health import get_livez, get_readyz, put_null
+from .handlers.nodes import (
+    create_node,
+    delete_node,
+    download_node,
+    get_node,
+    update_node,
+    upload_node,
+)
+from .handlers.upload import (
+    create_upload_session,
+    delete_upload_session,
+    head_upload_session,
+    patch_upload_chunk,
+)
+from .handlers.webhook import handle_synology_webhook
+from .keys import (
+    CHANGE_SERVICE_KEY,
+    CONFIG_KEY,
+    MOUNT_REGISTRY_KEY,
+    NETWORK_KEY,
+    OFF_MAIN_KEY,
+    READY_KEY,
+    STORAGE_KEY,
+    SYNOLOGY_PATH_KEY,
+    UPLOAD_SESSIONS_KEY,
+    WEBHOOK_QUEUE_KEY,
+    WRITE_QUEUE_KEY,
+)
+from .lib.mounts import MountRegistry, create_mount_registry
+from .services.network import NetworkService, create_network_service
+from .services.off_main import OffMainThreadService
+from .services.paths import SynologyPathService
+from .services.scan import StartupScanService
+from .services.storage import StorageService, create_storage_service
+from .services.sync import NodeSyncService
+from .services.upload import UploadSessionService, create_upload_session_service
+from .services.webhook import WebhookService
+from .types import ServerConfig, WriteQueue
+from .workers import (
+    METADATA_WORKER_COUNT,
+    checkpoint_worker,
+    create_metadata_queue,
+    create_webhook_queue,
+    create_write_queue,
+    metadata_worker,
+    write_worker,
+)
+
+
+_L = getLogger(__name__)
+
+
+@contextmanager
+def _managed_pool() -> Generator[ThreadPoolExecutor, None, None]:
+    pool = ThreadPoolExecutor()
+    try:
+        yield pool
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+@asynccontextmanager
+async def _background[T](
+    group: asyncio.TaskGroup, c: Coroutine[None, None, T]
+) -> AsyncGenerator[None, None]:
+    task = group.create_task(c)
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+@asynccontextmanager
+async def _managed_webhook(
+    network: NetworkService, config: ServerConfig
+) -> AsyncGenerator[None, None]:
+    stale = await list_webhooks(network, config.webhook_app_id)
+    for hook in stale:
+        try:
+            await delete_webhook(
+                network, str(hook["webhook_id"]), config.webhook_app_id
+            )
+        except Exception:
+            _L.warning("Failed to remove stale webhook %s", hook.get("webhook_id"))
+    webhook_id = await create_webhook(
+        network,
+        f"{config.public_url}/api/v1/synology-webhook",
+        config.webhook_app_id,
+    )
+    _L.info("Webhook registered: id=%s", webhook_id)
+    try:
+        yield
+    finally:
+        try:
+            await delete_webhook(network, webhook_id, config.webhook_app_id)
+            _L.info("Webhook unregistered: id=%s", webhook_id)
+        except Exception:
+            _L.warning("Failed to unregister webhook id=%s", webhook_id)
+
+
+@asynccontextmanager
+async def managed_off_main() -> AsyncGenerator[OffMainThreadService, None]:
+    with _managed_pool() as pool:
+        off_main = OffMainThreadService(pool)
+        yield off_main
+
+
+@asynccontextmanager
+async def _managed_background_tasks(
+    app: web.Application,
+    network: NetworkService,
+    storage: StorageService,
+    off_main: OffMainThreadService,
+    write_queue: WriteQueue,
+    mount_registry: MountRegistry,
+) -> AsyncGenerator[None, None]:
+    config: ServerConfig = app[CONFIG_KEY]
+    scan_done_event = asyncio.Event()
+    webhook_queue = create_webhook_queue()
+    app[READY_KEY] = False
+    app[WEBHOOK_QUEUE_KEY] = webhook_queue
+
+    async def _flip_ready() -> None:
+        await scan_done_event.wait()
+        await webhook_queue.join()
+        app[READY_KEY] = True
+
+    metadata_queue = create_metadata_queue()
+    node_sync = NodeSyncService(
+        storage=storage,
+        write_queue=write_queue,
+        off_main=off_main,
+        mounts=config.mounts,
+        local_paths=config.local_paths,
+        metadata_queue=metadata_queue,
+    )
+    app[CHANGE_SERVICE_KEY] = node_sync
+
+    startup_scan = StartupScanService(
+        network=network,
+        storage=storage,
+        syno_paths=app[SYNOLOGY_PATH_KEY],
+        node_sync=node_sync,
+    )
+
+    webhook_service = WebhookService(
+        network=network,
+        storage=storage,
+        node_sync=node_sync,
+        syno_paths=app[SYNOLOGY_PATH_KEY],
+        write_queue=write_queue,
+        mount_registry=mount_registry,
+    )
+
+    async with AsyncExitStack() as stack:
+        group = await stack.enter_async_context(asyncio.TaskGroup())
+        await stack.enter_async_context(_background(group, write_worker(write_queue)))
+        await stack.enter_async_context(_background(group, checkpoint_worker(storage)))
+        for _ in range(METADATA_WORKER_COUNT):
+            await stack.enter_async_context(
+                _background(
+                    group,
+                    metadata_worker(
+                        metadata_queue,
+                        node_sync.process_metadata_item,
+                    ),
+                )
+            )
+        await stack.enter_async_context(
+            _background(
+                group,
+                startup_scan.run_until_ready(scan_done_event),
+            )
+        )
+        await stack.enter_async_context(_background(group, _flip_ready()))
+        await stack.enter_async_context(
+            _background(
+                group,
+                webhook_service.run(webhook_queue, group, scan_done_event),
+            )
+        )
+        yield
+
+
+@asynccontextmanager
+async def _managed_upload_service(
+    config: ServerConfig,
+) -> AsyncGenerator[UploadSessionService, None]:
+    tmp_dir = Path(config.upload_tmp_dir) if config.upload_tmp_dir else None
+    with create_upload_session_service(tmp_dir=tmp_dir) as service:
+        yield service
+
+
+async def _app_lifecycle(app: web.Application) -> AsyncGenerator[None, None]:
+    config: ServerConfig = app[CONFIG_KEY]
+    async with AsyncExitStack() as stack:
+        network = await stack.enter_async_context(
+            create_network_service(
+                base_url=config.synology_url,
+                username=config.username,
+                password=config.password,
+                otp_code=config.otp_code,
+            )
+        )
+        app[NETWORK_KEY] = network
+
+        mount_registry = await create_mount_registry(network, config.mounts)
+        app[MOUNT_REGISTRY_KEY] = mount_registry
+        app[SYNOLOGY_PATH_KEY] = SynologyPathService(mount_registry)
+
+        off_main = await stack.enter_async_context(managed_off_main())
+        storage = await create_storage_service(config.database_url, off_main)
+        write_queue = create_write_queue()
+        app[STORAGE_KEY] = storage
+        app[OFF_MAIN_KEY] = off_main
+        app[WRITE_QUEUE_KEY] = write_queue
+
+        app[UPLOAD_SESSIONS_KEY] = await stack.enter_async_context(
+            _managed_upload_service(config)
+        )
+
+        await stack.enter_async_context(_managed_webhook(network, config))
+
+        await stack.enter_async_context(
+            _managed_background_tasks(
+                app, network, storage, off_main, write_queue, mount_registry
+            )
+        )
+
+        yield
+
+
+def create_app(config: ServerConfig) -> web.Application:
+    app = web.Application(
+        client_max_size=8 * 1024 * 1024
+    )  # 8 MiB limit for JSON/form bodies; upload endpoints use iter_chunked and bypass this
+    app[CONFIG_KEY] = config
+    app.cleanup_ctx.append(_app_lifecycle)
+
+    _add_routes(app)
+    return app
+
+
+def _add_routes(app: web.Application) -> None:
+    app.router.add_get("/livez", get_livez)
+    app.router.add_get("/readyz", get_readyz)
+    app.router.add_put("/null", put_null)
+    app.router.add_get("/api/v1/cursor", get_cursor)
+    app.router.add_get("/api/v1/root", get_root)
+    app.router.add_get("/api/v1/changes", get_changes)
+    app.router.add_get("/api/v1/nodes/{id}", get_node)
+    app.router.add_get("/api/v1/nodes/{id}/download", download_node)
+    app.router.add_post("/api/v1/nodes", create_node)
+    app.router.add_patch("/api/v1/nodes/{id}", update_node)
+    app.router.add_delete("/api/v1/nodes/{id}", delete_node)
+    app.router.add_post("/api/v1/nodes/{parent_id}", upload_node)
+    app.router.add_post("/api/v1/nodes/{parent_id}/uploads", create_upload_session)
+    app.router.add_patch("/api/v1/uploads/{session_id}", patch_upload_chunk)
+    app.router.add_head("/api/v1/uploads/{session_id}", head_upload_session)
+    app.router.add_delete("/api/v1/uploads/{session_id}", delete_upload_session)
+    app.router.add_post("/api/v1/synology-webhook", handle_synology_webhook)

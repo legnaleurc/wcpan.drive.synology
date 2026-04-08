@@ -1,11 +1,14 @@
 """Integration tests for the client–server HTTP contract.
 
 These tests spin up the real aiohttp handlers against a minimal in-process
-app (fake Storage, stub OffMainThread) and make actual HTTP requests via
+app (fake Storage, stub OffMainThreadService) and make actual HTTP requests via
 aiohttp.test_utils.TestClient.  No real Synology connection is needed.
 """
 
+import asyncio
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,29 +16,35 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from wcpan.drive.core.types import MediaInfo
 
-from wcpan.drive.synology.client._writable import _media_info_to_params
-from wcpan.drive.synology.lib import node_record_from_dict
-from wcpan.drive.synology.server._handlers import (
+from wcpan.drive.synology._client.writable import _media_info_to_params
+from wcpan.drive.synology._lib import node_record_from_dict
+from wcpan.drive.synology._server.handlers.changes import get_root
+from wcpan.drive.synology._server.handlers.health import put_null
+from wcpan.drive.synology._server.handlers.nodes import upload_node
+from wcpan.drive.synology._server.handlers.upload import (
     create_upload_session,
     delete_upload_session,
-    get_root,
-    get_upload_session,
-    put_upload_chunk,
-    upload_node,
+    head_upload_session,
+    patch_upload_chunk,
 )
-from wcpan.drive.synology.server._keys import (
-    folders_key,
-    network_key,
-    off_main_key,
-    ready_key,
-    storage_key,
-    upload_sessions_key,
-    volume_map_key,
-    write_queue_key,
+from wcpan.drive.synology._server.keys import (
+    CHANGE_SERVICE_KEY,
+    NETWORK_KEY,
+    OFF_MAIN_KEY,
+    READY_KEY,
+    STORAGE_KEY,
+    SYNOLOGY_PATH_KEY,
+    UPLOAD_SESSIONS_KEY,
+    WRITE_QUEUE_KEY,
 )
-from wcpan.drive.synology.server._upload_session import UploadSessionStore
-from wcpan.drive.synology.server._virtual_ids import SERVER_ROOT_ID
-from wcpan.drive.synology.server._workers import create_write_queue
+from wcpan.drive.synology._server.lib.mounts import MountRegistry
+from wcpan.drive.synology._server.services.paths import (
+    SERVER_ROOT_ID,
+    SynologyPathService,
+)
+from wcpan.drive.synology._server.services.sync import NodeSyncService
+from wcpan.drive.synology._server.services.upload import UploadSessionService
+from wcpan.drive.synology._server.workers import create_write_queue
 from wcpan.drive.synology.types import NodeRecord
 
 
@@ -53,7 +62,12 @@ _FAKE_SYNO_INFO = {
     "hash": "abc123",
 }
 
-_UPLOAD_FILE_PATH = "wcpan.drive.synology.server._handlers.synology_files.upload_file"
+_UPLOAD_FILE_NODES = (
+    "wcpan.drive.synology._server.handlers.nodes.synology_files.upload_file"
+)
+_UPLOAD_FILE_SESSIONS = (
+    "wcpan.drive.synology._server.handlers.upload.synology_files.upload_file"
+)
 
 
 class _FakeOffMain:
@@ -70,34 +84,38 @@ class _FakeStorage:
     def __init__(self) -> None:
         self._nodes: dict[str, NodeRecord] = {}
 
-    def get_node_by_id(self, node_id: str) -> NodeRecord | None:
+    async def get_node_by_id(self, node_id: str) -> NodeRecord | None:
         return self._nodes.get(node_id)
 
-    def upsert_node_and_emit_change(self, record: NodeRecord) -> None:
+    async def upsert_node_and_emit_change(self, record: NodeRecord) -> None:
         self._nodes[record.node_id] = record
 
 
 def _make_app(
-    storage: _FakeStorage, session_store: UploadSessionStore
+    storage: _FakeStorage,
+    session_store: UploadSessionService,
 ) -> web.Application:
     app = web.Application()
-    app[ready_key] = True
-    app[storage_key] = storage
-    app[off_main_key] = _FakeOffMain()
-    app[write_queue_key] = create_write_queue()
-    app[upload_sessions_key] = session_store
-    app[folders_key] = {}
-    app[volume_map_key] = None
-    app[network_key] = MagicMock()
+    off_main = _FakeOffMain()
+    wq = create_write_queue()
+    app[READY_KEY] = True
+    app[STORAGE_KEY] = storage
+    app[OFF_MAIN_KEY] = off_main
+    app[WRITE_QUEUE_KEY] = wq
+    app[UPLOAD_SESSIONS_KEY] = session_store
+    app[SYNOLOGY_PATH_KEY] = SynologyPathService(MountRegistry({}, {}))
+    app[CHANGE_SERVICE_KEY] = NodeSyncService(
+        storage, wq, off_main, {}, {}, metadata_queue=asyncio.Queue()
+    )  # type: ignore[arg-type]
+    app[NETWORK_KEY] = MagicMock()
 
     app.router.add_get("/api/v1/root", get_root)
-    app.router.add_post("/api/v1/nodes/{parent_id}/upload", upload_node)
-    app.router.add_post(
-        "/api/v1/nodes/{parent_id}/upload-session", create_upload_session
-    )
-    app.router.add_put("/api/v1/upload-sessions/{session_id}", put_upload_chunk)
-    app.router.add_get("/api/v1/upload-sessions/{session_id}", get_upload_session)
-    app.router.add_delete("/api/v1/upload-sessions/{session_id}", delete_upload_session)
+    app.router.add_put("/null", put_null)
+    app.router.add_post("/api/v1/nodes/{parent_id}", upload_node)
+    app.router.add_post("/api/v1/nodes/{parent_id}/uploads", create_upload_session)
+    app.router.add_patch("/api/v1/uploads/{session_id}", patch_upload_chunk)
+    app.router.add_head("/api/v1/uploads/{session_id}", head_upload_session)
+    app.router.add_delete("/api/v1/uploads/{session_id}", delete_upload_session)
     return app
 
 
@@ -105,10 +123,12 @@ class TestMediaInfoContract(IsolatedAsyncioTestCase):
     """Client MediaInfo encoding must be correctly decoded by the server."""
 
     def setUp(self) -> None:
-        self._session_store = UploadSessionStore()
+        self._tmp = tempfile.TemporaryDirectory(prefix="wcpan_test_")
+        self._session_store = UploadSessionService(tmp_dir=Path(self._tmp.name))
 
     def tearDown(self) -> None:
         self._session_store.close_all()
+        self._tmp.cleanup()
 
     async def test_upload_session_carries_media_info(self) -> None:
         """MediaInfo dimensions and flags survive the upload-session protocol."""
@@ -125,23 +145,22 @@ class TestMediaInfoContract(IsolatedAsyncioTestCase):
         params = _media_info_to_params(media)
 
         with patch(
-            _UPLOAD_FILE_PATH, new_callable=AsyncMock, return_value=_FAKE_SYNO_INFO
+            _UPLOAD_FILE_SESSIONS, new_callable=AsyncMock, return_value=_FAKE_SYNO_INFO
         ):
             async with TestClient(TestServer(app)) as client:
                 # Step 1 — create session
                 resp = await client.post(
-                    "/api/v1/nodes/parent-a/upload-session",
-                    params={"name": "photo.jpg", "size": "10", **params},
+                    "/api/v1/nodes/parent-a/uploads",
+                    json={"name": "photo.jpg", "size": 10, **params},
                 )
                 self.assertEqual(resp.status, 201)
-                body = await resp.json()
-                session_id = body["session_id"]
+                session_id = resp.headers["Location"].split("/")[-1]
 
                 # Step 2 — send the single chunk; server finalises and returns 201
-                resp2 = await client.put(
-                    f"/api/v1/upload-sessions/{session_id}",
+                resp2 = await client.patch(
+                    f"/api/v1/uploads/{session_id}",
                     data=b"x" * 10,
-                    headers={"Content-Range": "bytes 0-9/10"},
+                    headers={"Upload-Offset": "0"},
                 )
                 self.assertEqual(resp2.status, 201)
                 record = node_record_from_dict(await resp2.json())
@@ -166,11 +185,11 @@ class TestMediaInfoContract(IsolatedAsyncioTestCase):
         params = _media_info_to_params(media)
 
         with patch(
-            _UPLOAD_FILE_PATH, new_callable=AsyncMock, return_value=_FAKE_SYNO_INFO
+            _UPLOAD_FILE_NODES, new_callable=AsyncMock, return_value=_FAKE_SYNO_INFO
         ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
-                    "/api/v1/nodes/parent-a/upload",
+                    "/api/v1/nodes/parent-a",
                     data=b"x" * 10,
                     params={"name": "photo.jpg", **params},
                 )
@@ -196,19 +215,21 @@ class TestMediaInfoContract(IsolatedAsyncioTestCase):
         )
         params = _media_info_to_params(media)
 
-        with patch(_UPLOAD_FILE_PATH, new_callable=AsyncMock, return_value=syno_info):
+        with patch(
+            _UPLOAD_FILE_SESSIONS, new_callable=AsyncMock, return_value=syno_info
+        ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
-                    "/api/v1/nodes/parent-a/upload-session",
-                    params={"name": "clip.mp4", "size": "10", **params},
+                    "/api/v1/nodes/parent-a/uploads",
+                    json={"name": "clip.mp4", "size": 10, **params},
                 )
                 self.assertEqual(resp.status, 201)
-                session_id = (await resp.json())["session_id"]
+                session_id = resp.headers["Location"].split("/")[-1]
 
-                resp2 = await client.put(
-                    f"/api/v1/upload-sessions/{session_id}",
+                resp2 = await client.patch(
+                    f"/api/v1/uploads/{session_id}",
                     data=b"v" * 10,
-                    headers={"Content-Range": "bytes 0-9/10"},
+                    headers={"Upload-Offset": "0"},
                 )
                 self.assertEqual(resp2.status, 201)
                 record = node_record_from_dict(await resp2.json())
@@ -224,10 +245,12 @@ class TestNodeRecordRoundTrip(IsolatedAsyncioTestCase):
     """NodeRecord JSON serialization must survive an HTTP round-trip."""
 
     def setUp(self) -> None:
-        self._session_store = UploadSessionStore()
+        self._tmp = tempfile.TemporaryDirectory(prefix="wcpan_test_")
+        self._session_store = UploadSessionService(tmp_dir=Path(self._tmp.name))
 
     def tearDown(self) -> None:
         self._session_store.close_all()
+        self._tmp.cleanup()
 
     async def test_get_root_datetime_timezone_preserved(self) -> None:
         """ctime/mtime timezone info is preserved through server JSON serialization."""
@@ -263,35 +286,62 @@ class TestNodeRecordRoundTrip(IsolatedAsyncioTestCase):
         self.assertEqual(record.mtime, _EPOCH)
 
 
+class TestNullUploadSink(IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="wcpan_test_")
+        self._session_store = UploadSessionService(tmp_dir=Path(self._tmp.name))
+
+    def tearDown(self) -> None:
+        self._session_store.close_all()
+        self._tmp.cleanup()
+
+    async def test_put_null_returns_upload_stats(self) -> None:
+        storage = _FakeStorage()
+        app = _make_app(storage, self._session_store)
+        payload = b"x" * 8192
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.put("/null", data=payload)
+            self.assertEqual(resp.status, 200)
+            body = await resp.json()
+
+        self.assertEqual(body["bytes_received"], len(payload))
+        self.assertGreaterEqual(body["elapsed_seconds"], 0.0)
+        self.assertGreaterEqual(body["bytes_per_second"], 0.0)
+        self.assertGreaterEqual(body["mebibytes_per_second"], 0.0)
+
+
 class TestUploadSessionProtocol(IsolatedAsyncioTestCase):
     """Multi-step upload session protocol: create → chunk → finalise."""
 
     def setUp(self) -> None:
-        self._session_store = UploadSessionStore()
+        self._tmp = tempfile.TemporaryDirectory(prefix="wcpan_test_")
+        self._session_store = UploadSessionService(tmp_dir=Path(self._tmp.name))
 
     def tearDown(self) -> None:
         self._session_store.close_all()
+        self._tmp.cleanup()
 
-    async def test_chunked_upload_returns_node_record(self) -> None:
-        """PUT with full Content-Range returns 201 with a parseable NodeRecord."""
+    async def test_upload_returns_node_record(self) -> None:
+        """PATCH with full file data returns 201 with a parseable NodeRecord."""
         storage = _FakeStorage()
         app = _make_app(storage, self._session_store)
 
         with patch(
-            _UPLOAD_FILE_PATH, new_callable=AsyncMock, return_value=_FAKE_SYNO_INFO
+            _UPLOAD_FILE_SESSIONS, new_callable=AsyncMock, return_value=_FAKE_SYNO_INFO
         ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
-                    "/api/v1/nodes/parent-a/upload-session",
-                    params={"name": "photo.jpg", "size": "10"},
+                    "/api/v1/nodes/parent-a/uploads",
+                    json={"name": "photo.jpg", "size": 10},
                 )
                 self.assertEqual(resp.status, 201)
-                session_id = (await resp.json())["session_id"]
+                session_id = resp.headers["Location"].split("/")[-1]
 
-                resp2 = await client.put(
-                    f"/api/v1/upload-sessions/{session_id}",
+                resp2 = await client.patch(
+                    f"/api/v1/uploads/{session_id}",
                     data=b"y" * 10,
-                    headers={"Content-Range": "bytes 0-9/10"},
+                    headers={"Upload-Offset": "0"},
                 )
                 self.assertEqual(resp2.status, 201)
                 record = node_record_from_dict(await resp2.json())
@@ -299,37 +349,35 @@ class TestUploadSessionProtocol(IsolatedAsyncioTestCase):
         self.assertEqual(record.node_id, "syno-99")
         self.assertEqual(record.name, "photo.jpg")
 
-    async def test_partial_chunk_returns_200_with_received(self) -> None:
-        """PUT with a partial Content-Range returns 200 and the byte count received."""
+    async def test_partial_patch_returns_204(self) -> None:
+        """PATCH with partial data returns 204 with updated Upload-Offset."""
         storage = _FakeStorage()
         app = _make_app(storage, self._session_store)
 
         async with TestClient(TestServer(app)) as client:
             resp = await client.post(
-                "/api/v1/nodes/parent-a/upload-session",
-                params={"name": "big.bin", "size": "20"},
+                "/api/v1/nodes/parent-a/uploads",
+                json={"name": "big.bin", "size": 20},
             )
             self.assertEqual(resp.status, 201)
-            session_id = (await resp.json())["session_id"]
+            session_id = resp.headers["Location"].split("/")[-1]
 
-            # First chunk (bytes 0–9 of a 20-byte file)
-            resp2 = await client.put(
-                f"/api/v1/upload-sessions/{session_id}",
+            resp2 = await client.patch(
+                f"/api/v1/uploads/{session_id}",
                 data=b"a" * 10,
-                headers={"Content-Range": "bytes 0-9/20"},
+                headers={"Upload-Offset": "0"},
             )
-            self.assertEqual(resp2.status, 200)
-            body = await resp2.json()
-            self.assertEqual(body["received"], 10)
+            self.assertEqual(resp2.status, 204)
+            self.assertEqual(resp2.headers["Upload-Offset"], "10")
 
     async def test_session_not_found_returns_404(self) -> None:
         storage = _FakeStorage()
         app = _make_app(storage, self._session_store)
 
         async with TestClient(TestServer(app)) as client:
-            resp = await client.put(
-                "/api/v1/upload-sessions/no-such-session",
+            resp = await client.patch(
+                "/api/v1/uploads/no-such-session",
                 data=b"x",
-                headers={"Content-Range": "bytes 0-0/1"},
+                headers={"Upload-Offset": "0"},
             )
             self.assertEqual(resp.status, 404)

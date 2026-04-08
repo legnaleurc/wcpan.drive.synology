@@ -1,0 +1,154 @@
+"""Tests for scanner write-back of per-mount state to database."""
+
+import asyncio
+import os
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
+from unittest import IsolatedAsyncioTestCase
+from unittest.mock import AsyncMock, patch
+
+from wcpan.drive.synology._server.lib.mounts import MountRegistry
+from wcpan.drive.synology._server.services.off_main import OffMainThreadService
+from wcpan.drive.synology._server.services.paths import SynologyPathService
+from wcpan.drive.synology._server.services.scan import StartupScanService
+from wcpan.drive.synology._server.services.storage import StorageService
+from wcpan.drive.synology._server.services.sync import NodeSyncService
+from wcpan.drive.synology._server.types import WriteQueue
+from wcpan.drive.synology._server.workers import create_write_queue
+
+
+class TestScannerWriteBack(IsolatedAsyncioTestCase):
+    async def _drain_writes(self, q: WriteQueue) -> None:
+        try:
+            while True:
+                job = await q.get()
+                try:
+                    await job()
+                finally:
+                    q.task_done()
+        except asyncio.CancelledError:
+            raise
+
+    async def _run_initial_sync(
+        self,
+        storage: StorageService,
+        mounts: dict[str, str],
+        scan_result: dict[str, int],
+        pre_scan_result: dict[str, int] | None = None,
+    ) -> None:
+        if pre_scan_result is None:
+            pre_scan_result = scan_result
+        q = create_write_queue()
+        with ThreadPoolExecutor(2) as pool:
+            off_main = OffMainThreadService(pool)
+            cs = NodeSyncService(
+                storage, q, off_main, mounts, {}, metadata_queue=asyncio.Queue()
+            )
+            drain = asyncio.create_task(self._drain_writes(q))
+            try:
+                with patch.object(
+                    StartupScanService,
+                    "_scan_all_mounts",
+                    new=AsyncMock(return_value=(scan_result, pre_scan_result)),
+                ):
+                    svc = StartupScanService(
+                        network=None,  # type: ignore[arg-type]
+                        storage=storage,
+                        syno_paths=SynologyPathService(MountRegistry(mounts, {})),
+                        node_sync=cs,
+                    )
+                    await svc.run_initial_scan()
+            finally:
+                await q.join()
+                drain.cancel()
+                with suppress(asyncio.CancelledError):
+                    await drain
+
+    async def test_first_run_writes_per_mount_state(self) -> None:
+        """On first run (all zeros), scan results are persisted via set_mount_state."""
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            with ThreadPoolExecutor() as pool:
+                storage = StorageService(db_path, OffMainThreadService(pool))
+                await storage.ensure_schema()
+                mounts = {"a": "/vol/a", "b": "/vol/b"}
+
+                await self._run_initial_sync(storage, mounts, {"a": 500, "b": 300})
+
+                result = await storage.get_mount_max_ids(mounts)
+                self.assertEqual(result, {"a": 500, "b": 300})
+        finally:
+            os.unlink(db_path)
+
+    async def test_resume_advances_max_id(self) -> None:
+        """On resume, scan results that advance the max_id are persisted."""
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            with ThreadPoolExecutor() as pool:
+                storage = StorageService(db_path, OffMainThreadService(pool))
+                await storage.ensure_schema()
+                mounts = {"a": "/vol/a", "b": "/vol/b"}
+                # Seed existing per-mount state
+                await storage.set_mount_state("a", "/vol/a", 100)
+                await storage.set_mount_state("b", "/vol/b", 80)
+
+                await self._run_initial_sync(storage, mounts, {"a": 200, "b": 150})
+
+                result = await storage.get_mount_max_ids(mounts)
+                self.assertEqual(result, {"a": 200, "b": 150})
+        finally:
+            os.unlink(db_path)
+
+    async def test_no_advance_skips_write(self) -> None:
+        """When scan returns the same max_id, set_mount_state is not called."""
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            with ThreadPoolExecutor() as pool:
+                storage = StorageService(db_path, OffMainThreadService(pool))
+                await storage.ensure_schema()
+                mounts = {"a": "/vol/a", "b": "/vol/b"}
+                await storage.set_mount_state("a", "/vol/a", 100)
+                await storage.set_mount_state("b", "/vol/b", 80)
+
+                # Scan returns identical values — no advance
+                await self._run_initial_sync(storage, mounts, {"a": 100, "b": 80})
+
+                result = await storage.get_mount_max_ids(mounts)
+                self.assertEqual(result, {"a": 100, "b": 80})
+        finally:
+            os.unlink(db_path)
+
+    async def test_initial_sync_uses_pre_scan_checkpoint(self) -> None:
+        """Initial sync saves the pre-scan checkpoint, not per_mount_highest.
+
+        Changes that occur in already-visited folders mid-BFS get sync_ids
+        lower than per_mount_highest but higher than pre_scan_max_id.  Saving
+        the checkpoint lets the first incremental scan cover that window.
+        """
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            with ThreadPoolExecutor() as pool:
+                storage = StorageService(db_path, OffMainThreadService(pool))
+                await storage.ensure_schema()
+                mounts = {"a": "/vol/a"}
+
+                # per_mount_highest=500 (saw a late folder), pre_scan=300 (snapshot
+                # taken before BFS started); the DB must record 300 so that the
+                # incremental scan re-covers sync_ids 301-500 and catches any
+                # mid-BFS changes in already-visited folders.
+                await self._run_initial_sync(
+                    storage,
+                    mounts,
+                    scan_result={"a": 500},
+                    pre_scan_result={"a": 300},
+                )
+
+                result = await storage.get_mount_max_ids(mounts)
+                self.assertEqual(result, {"a": 300})
+        finally:
+            os.unlink(db_path)

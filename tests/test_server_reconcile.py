@@ -1,22 +1,83 @@
 """Tests for API backfill / subtree reconcile."""
 
+import asyncio
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from datetime import UTC, datetime
-from unittest import IsolatedAsyncioTestCase, TestCase
+from pathlib import PurePosixPath
+from unittest import IsolatedAsyncioTestCase
 from unittest.mock import MagicMock, patch
 
-from wcpan.drive.synology.lib import FOLDER_MIME_TYPE
-from wcpan.drive.synology.server._db import Storage
-from wcpan.drive.synology.server._reconcile import (
-    reconcile_subtree,
-    virtual_path_to_directory_node_id,
+from wcpan.drive.synology._lib import FOLDER_MIME_TYPE
+from wcpan.drive.synology._server.lib.mounts import (
+    SERVER_ROOT_ID,
+    MountRegistry,
+    mount_id,
 )
-from wcpan.drive.synology.server._virtual_ids import SERVER_ROOT_ID, mount_id
+from wcpan.drive.synology._server.services.backfill import BackfillService
+from wcpan.drive.synology._server.services.off_main import OffMainThreadService
+from wcpan.drive.synology._server.services.paths import (
+    SynologyPathService,
+    VirtualPathService,
+)
+from wcpan.drive.synology._server.services.storage import StorageService
+from wcpan.drive.synology._server.services.sync import NodeSyncService
+from wcpan.drive.synology._server.types import SynologyPath
+from wcpan.drive.synology._server.workers import (
+    create_metadata_queue,
+    create_write_queue,
+    metadata_worker,
+    write_worker,
+)
 from wcpan.drive.synology.types import NodeRecord
 
 
 _TS = int(datetime(2024, 1, 1, tzinfo=UTC).timestamp())
+
+
+async def _reconcile_with_worker(
+    storage: StorageService,
+    mounts: dict[str, str],
+    network: object,
+    root_id: str,
+    *,
+    dry_run: bool,
+    list_children_side_effect: object,
+) -> dict[str, int]:
+    q = create_write_queue()
+    mq = create_metadata_queue()
+    with ThreadPoolExecutor(2) as pool:
+        off_main = OffMainThreadService(pool)
+        cs = NodeSyncService(storage, q, off_main, mounts, {}, metadata_queue=mq)
+        syno_mounts = {k: SynologyPath(PurePosixPath(v)) for k, v in mounts.items()}
+        syno_paths = SynologyPathService(MountRegistry(syno_mounts, {}))
+        bf = BackfillService(
+            network=network,
+            storage=storage,
+            syno_paths=syno_paths,
+            node_sync=cs,
+        )
+        write_task = asyncio.create_task(write_worker(q))
+        meta_task = asyncio.create_task(metadata_worker(mq, cs.process_metadata_item))
+        try:
+            with patch.object(
+                syno_paths,
+                "list_children",
+                side_effect=list_children_side_effect,
+            ):
+                stats = await bf._reconcile_subtree(root_id, dry_run=dry_run)
+            await mq.join()
+            await q.join()
+            return stats
+        finally:
+            meta_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await meta_task
+            write_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await write_task
 
 
 def _node(
@@ -69,57 +130,57 @@ def _syno_item(
     }
 
 
-class TestVirtualPathToDirectoryNodeId(TestCase):
-    def _storage_with_tree(self) -> Storage:
-        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+class TestVirtualPathToDirectoryNodeId(IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        fd, self.db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
-        self.addCleanup(os.unlink, db_path)
-        storage = Storage(db_path)
-        storage.ensure_schema()
-        storage.bulk_upsert_nodes(
+        self.pool = ThreadPoolExecutor()
+        storage = StorageService(self.db_path, OffMainThreadService(self.pool))
+        await storage.ensure_schema()
+        await storage.bulk_upsert_nodes(
             [
                 _node(SERVER_ROOT_ID, "", None, is_directory=True),
                 _node(mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True),
                 _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
             ]
         )
-        return storage
+        self.svc = VirtualPathService(storage)
 
-    def test_root_slash(self) -> None:
-        storage = self._storage_with_tree()
+    async def asyncTearDown(self) -> None:
+        self.pool.shutdown(wait=False, cancel_futures=True)
+        os.unlink(self.db_path)
+
+    async def test_root_slash(self) -> None:
         self.assertEqual(
-            virtual_path_to_directory_node_id(storage, "/"), SERVER_ROOT_ID
+            await self.svc.resolve_to_directory_node_id("/"),
+            SERVER_ROOT_ID,
         )
 
-    def test_root_empty(self) -> None:
-        storage = self._storage_with_tree()
+    async def test_root_empty(self) -> None:
         self.assertEqual(
-            virtual_path_to_directory_node_id(storage, "  "), SERVER_ROOT_ID
+            await self.svc.resolve_to_directory_node_id("  "),
+            SERVER_ROOT_ID,
         )
 
-    def test_mount_only(self) -> None:
-        storage = self._storage_with_tree()
+    async def test_mount_only(self) -> None:
         self.assertEqual(
-            virtual_path_to_directory_node_id(storage, "/docs"),
+            await self.svc.resolve_to_directory_node_id("/docs"),
             mount_id("docs"),
         )
 
-    def test_nested(self) -> None:
-        storage = self._storage_with_tree()
+    async def test_nested(self) -> None:
         self.assertEqual(
-            virtual_path_to_directory_node_id(storage, "/docs/Projects"),
+            await self.svc.resolve_to_directory_node_id("/docs/Projects"),
             "dir-1",
         )
 
-    def test_rejects_dotdot(self) -> None:
-        storage = self._storage_with_tree()
+    async def test_rejects_dotdot(self) -> None:
         with self.assertRaises(ValueError):
-            virtual_path_to_directory_node_id(storage, "/docs/../x")
+            await self.svc.resolve_to_directory_node_id("/docs/../x")
 
-    def test_missing_segment_raises(self) -> None:
-        storage = self._storage_with_tree()
+    async def test_missing_segment_raises(self) -> None:
         with self.assertRaises(ValueError):
-            virtual_path_to_directory_node_id(storage, "/docs/Nope")
+            await self.svc.resolve_to_directory_node_id("/docs/Nope")
 
 
 class TestReconcileSubtree(IsolatedAsyncioTestCase):
@@ -127,41 +188,43 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         try:
-            storage = Storage(db_path)
-            storage.ensure_schema()
-            storage.bulk_upsert_nodes(
-                [
-                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
-                    _node(mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True),
-                    _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
-                    _node("f-1", "x.txt", "dir-1", size=0, width=42),
-                ]
-            )
-            folders = {"docs": "/volume1/docs"}
-            network = MagicMock()
+            with ThreadPoolExecutor() as pool:
+                storage = StorageService(db_path, OffMainThreadService(pool))
+                await storage.ensure_schema()
+                await storage.bulk_upsert_nodes(
+                    [
+                        _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                        _node(
+                            mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True
+                        ),
+                        _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
+                        _node("f-1", "x.txt", "dir-1", size=0, width=42),
+                    ]
+                )
+                mounts = {"docs": "/volume1/docs"}
+                network = MagicMock()
 
-            async def _list_children(
-                _nw: object, parent_id: str, _fd: dict[str, str]
-            ) -> list[dict]:
-                if parent_id == "dir-1":
-                    return [_syno_item("f-1", "x.txt", size=999)]
-                return []
+                async def _list_children(_nw: object, parent_id: str) -> list[dict]:
+                    if parent_id == "dir-1":
+                        return [_syno_item("f-1", "x.txt", size=999)]
+                    return []
 
-            with patch(
-                "wcpan.drive.synology.server._reconcile.list_children_for_parent",
-                side_effect=_list_children,
-            ):
-                stats = await reconcile_subtree(
-                    storage, network, folders, "dir-1", dry_run=False
+                stats = await _reconcile_with_worker(
+                    storage,
+                    mounts,
+                    network,
+                    "dir-1",
+                    dry_run=False,
+                    list_children_side_effect=_list_children,
                 )
 
-            self.assertEqual(stats["checked"], 1)
-            self.assertEqual(stats["updated"], 1)
-            self.assertEqual(stats["added"], 0)
-            updated = storage.get_node_by_id("f-1")
-            assert updated is not None
-            self.assertEqual(updated.size, 999)
-            self.assertEqual(updated.width, 42)
+                self.assertEqual(stats["checked"], 1)
+                self.assertEqual(stats["updated"], 1)
+                self.assertEqual(stats["added"], 0)
+                updated = await storage.get_node_by_id("f-1")
+                assert updated is not None
+                self.assertEqual(updated.size, 999)
+                self.assertEqual(updated.width, 42)
         finally:
             os.unlink(db_path)
 
@@ -169,38 +232,40 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         try:
-            storage = Storage(db_path)
-            storage.ensure_schema()
-            storage.bulk_upsert_nodes(
-                [
-                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
-                    _node(mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True),
-                    _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
-                    _node("f-1", "x.txt", "dir-1", size=0),
-                ]
-            )
-            folders = {"docs": "/volume1/docs"}
-            network = MagicMock()
+            with ThreadPoolExecutor() as pool:
+                storage = StorageService(db_path, OffMainThreadService(pool))
+                await storage.ensure_schema()
+                await storage.bulk_upsert_nodes(
+                    [
+                        _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                        _node(
+                            mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True
+                        ),
+                        _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
+                        _node("f-1", "x.txt", "dir-1", size=0),
+                    ]
+                )
+                mounts = {"docs": "/volume1/docs"}
+                network = MagicMock()
 
-            async def _list_children(
-                _nw: object, parent_id: str, _fd: dict[str, str]
-            ) -> list[dict]:
-                if parent_id == "dir-1":
-                    return [_syno_item("f-1", "x.txt", size=500)]
-                return []
+                async def _list_children(_nw: object, parent_id: str) -> list[dict]:
+                    if parent_id == "dir-1":
+                        return [_syno_item("f-1", "x.txt", size=500)]
+                    return []
 
-            with patch(
-                "wcpan.drive.synology.server._reconcile.list_children_for_parent",
-                side_effect=_list_children,
-            ):
-                stats = await reconcile_subtree(
-                    storage, network, folders, "dir-1", dry_run=True
+                stats = await _reconcile_with_worker(
+                    storage,
+                    mounts,
+                    network,
+                    "dir-1",
+                    dry_run=True,
+                    list_children_side_effect=_list_children,
                 )
 
-            self.assertEqual(stats["updated"], 1)
-            updated = storage.get_node_by_id("f-1")
-            assert updated is not None
-            self.assertEqual(updated.size, 0)
+                self.assertEqual(stats["updated"], 1)
+                updated = await storage.get_node_by_id("f-1")
+                assert updated is not None
+                self.assertEqual(updated.size, 0)
         finally:
             os.unlink(db_path)
 
@@ -208,41 +273,43 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         try:
-            storage = Storage(db_path)
-            storage.ensure_schema()
-            storage.bulk_upsert_nodes(
-                [
-                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
-                    _node(mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True),
-                    _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
-                ]
-            )
-            folders = {"docs": "/volume1/docs"}
-            network = MagicMock()
+            with ThreadPoolExecutor() as pool:
+                storage = StorageService(db_path, OffMainThreadService(pool))
+                await storage.ensure_schema()
+                await storage.bulk_upsert_nodes(
+                    [
+                        _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                        _node(
+                            mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True
+                        ),
+                        _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
+                    ]
+                )
+                mounts = {"docs": "/volume1/docs"}
+                network = MagicMock()
 
-            async def _list_children(
-                _nw: object, parent_id: str, _fd: dict[str, str]
-            ) -> list[dict]:
-                if parent_id == "dir-1":
-                    return [_syno_item("f-new", "new.txt", size=100)]
-                return []
+                async def _list_children(_nw: object, parent_id: str) -> list[dict]:
+                    if parent_id == "dir-1":
+                        return [_syno_item("f-new", "new.txt", size=100)]
+                    return []
 
-            with patch(
-                "wcpan.drive.synology.server._reconcile.list_children_for_parent",
-                side_effect=_list_children,
-            ):
-                stats = await reconcile_subtree(
-                    storage, network, folders, "dir-1", dry_run=False
+                stats = await _reconcile_with_worker(
+                    storage,
+                    mounts,
+                    network,
+                    "dir-1",
+                    dry_run=False,
+                    list_children_side_effect=_list_children,
                 )
 
-            self.assertEqual(stats["checked"], 1)
-            self.assertEqual(stats["added"], 1)
-            self.assertEqual(stats["updated"], 0)
-            added = storage.get_node_by_id("f-new")
-            self.assertIsNotNone(added)
-            assert added is not None
-            self.assertEqual(added.name, "new.txt")
-            self.assertEqual(added.parent_id, "dir-1")
+                self.assertEqual(stats["checked"], 1)
+                self.assertEqual(stats["added"], 1)
+                self.assertEqual(stats["updated"], 0)
+                added = await storage.get_node_by_id("f-new")
+                self.assertIsNotNone(added)
+                assert added is not None
+                self.assertEqual(added.name, "new.txt")
+                self.assertEqual(added.parent_id, "dir-1")
         finally:
             os.unlink(db_path)
 
@@ -250,37 +317,39 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         try:
-            storage = Storage(db_path)
-            storage.ensure_schema()
-            storage.bulk_upsert_nodes(
-                [
-                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
-                    _node(mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True),
-                ]
-            )
-            folders = {"docs": "/volume1/docs"}
-            network = MagicMock()
-            listed: list[str] = []
+            with ThreadPoolExecutor() as pool:
+                storage = StorageService(db_path, OffMainThreadService(pool))
+                await storage.ensure_schema()
+                await storage.bulk_upsert_nodes(
+                    [
+                        _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                        _node(
+                            mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True
+                        ),
+                    ]
+                )
+                mounts = {"docs": "/volume1/docs"}
+                network = MagicMock()
+                listed: list[str] = []
 
-            async def _list_children(
-                _nw: object, parent_id: str, _fd: dict[str, str]
-            ) -> list[dict]:
-                listed.append(parent_id)
-                if parent_id == mount_id("docs"):
-                    return [_syno_item("f-1", "readme.txt")]
-                return []
+                async def _list_children(_nw: object, parent_id: str) -> list[dict]:
+                    listed.append(parent_id)
+                    if parent_id == mount_id("docs"):
+                        return [_syno_item("f-1", "readme.txt")]
+                    return []
 
-            with patch(
-                "wcpan.drive.synology.server._reconcile.list_children_for_parent",
-                side_effect=_list_children,
-            ):
-                stats = await reconcile_subtree(
-                    storage, network, folders, SERVER_ROOT_ID, dry_run=False
+                stats = await _reconcile_with_worker(
+                    storage,
+                    mounts,
+                    network,
+                    SERVER_ROOT_ID,
+                    dry_run=False,
+                    list_children_side_effect=_list_children,
                 )
 
-            self.assertIn(mount_id("docs"), listed)
-            self.assertEqual(stats["checked"], 1)
-            self.assertEqual(stats["added"], 1)
+                self.assertIn(mount_id("docs"), listed)
+                self.assertEqual(stats["checked"], 1)
+                self.assertEqual(stats["added"], 1)
         finally:
             os.unlink(db_path)
 
@@ -288,35 +357,37 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         try:
-            storage = Storage(db_path)
-            storage.ensure_schema()
-            storage.bulk_upsert_nodes(
-                [
-                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
-                    _node(mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True),
-                    _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
-                ]
-            )
-            folders = {"docs": "/volume1/docs"}
-            network = MagicMock()
+            with ThreadPoolExecutor() as pool:
+                storage = StorageService(db_path, OffMainThreadService(pool))
+                await storage.ensure_schema()
+                await storage.bulk_upsert_nodes(
+                    [
+                        _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                        _node(
+                            mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True
+                        ),
+                        _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
+                    ]
+                )
+                mounts = {"docs": "/volume1/docs"}
+                network = MagicMock()
 
-            async def _list_children(
-                _nw: object, parent_id: str, _fd: dict[str, str]
-            ) -> list[dict]:
-                if parent_id == "dir-1":
-                    return [_syno_item("f-new", "new.txt")]
-                return []
+                async def _list_children(_nw: object, parent_id: str) -> list[dict]:
+                    if parent_id == "dir-1":
+                        return [_syno_item("f-new", "new.txt")]
+                    return []
 
-            with patch(
-                "wcpan.drive.synology.server._reconcile.list_children_for_parent",
-                side_effect=_list_children,
-            ):
-                stats = await reconcile_subtree(
-                    storage, network, folders, "dir-1", dry_run=True
+                stats = await _reconcile_with_worker(
+                    storage,
+                    mounts,
+                    network,
+                    "dir-1",
+                    dry_run=True,
+                    list_children_side_effect=_list_children,
                 )
 
-            self.assertEqual(stats["added"], 1)
-            self.assertIsNone(storage.get_node_by_id("f-new"))
+                self.assertEqual(stats["added"], 1)
+                self.assertIsNone(await storage.get_node_by_id("f-new"))
         finally:
             os.unlink(db_path)
 
@@ -324,39 +395,41 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         try:
-            storage = Storage(db_path)
-            storage.ensure_schema()
-            storage.bulk_upsert_nodes(
-                [
-                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
-                    _node(mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True),
-                    _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
-                    _node("f-1", "keep.txt", "dir-1"),
-                    _node("f-2", "deleted.txt", "dir-1"),
-                ]
-            )
-            folders = {"docs": "/volume1/docs"}
-            network = MagicMock()
+            with ThreadPoolExecutor() as pool:
+                storage = StorageService(db_path, OffMainThreadService(pool))
+                await storage.ensure_schema()
+                await storage.bulk_upsert_nodes(
+                    [
+                        _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                        _node(
+                            mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True
+                        ),
+                        _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
+                        _node("f-1", "keep.txt", "dir-1"),
+                        _node("f-2", "deleted.txt", "dir-1"),
+                    ]
+                )
+                mounts = {"docs": "/volume1/docs"}
+                network = MagicMock()
 
-            async def _list_children(
-                _nw: object, parent_id: str, _fd: dict[str, str]
-            ) -> list[dict]:
-                if parent_id == "dir-1":
-                    return [_syno_item("f-1", "keep.txt")]
-                return []
+                async def _list_children(_nw: object, parent_id: str) -> list[dict]:
+                    if parent_id == "dir-1":
+                        return [_syno_item("f-1", "keep.txt")]
+                    return []
 
-            with patch(
-                "wcpan.drive.synology.server._reconcile.list_children_for_parent",
-                side_effect=_list_children,
-            ):
-                stats = await reconcile_subtree(
-                    storage, network, folders, "dir-1", dry_run=False
+                stats = await _reconcile_with_worker(
+                    storage,
+                    mounts,
+                    network,
+                    "dir-1",
+                    dry_run=False,
+                    list_children_side_effect=_list_children,
                 )
 
-            self.assertEqual(stats["checked"], 1)
-            self.assertEqual(stats["removed"], 1)
-            self.assertIsNotNone(storage.get_node_by_id("f-1"))
-            self.assertIsNone(storage.get_node_by_id("f-2"))
+                self.assertEqual(stats["checked"], 1)
+                self.assertEqual(stats["removed"], 1)
+                self.assertIsNotNone(await storage.get_node_by_id("f-1"))
+                self.assertIsNone(await storage.get_node_by_id("f-2"))
         finally:
             os.unlink(db_path)
 
@@ -364,36 +437,38 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         try:
-            storage = Storage(db_path)
-            storage.ensure_schema()
-            storage.bulk_upsert_nodes(
-                [
-                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
-                    _node(mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True),
-                    _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
-                    _node("f-1", "keep.txt", "dir-1"),
-                    _node("f-2", "deleted.txt", "dir-1"),
-                ]
-            )
-            folders = {"docs": "/volume1/docs"}
-            network = MagicMock()
+            with ThreadPoolExecutor() as pool:
+                storage = StorageService(db_path, OffMainThreadService(pool))
+                await storage.ensure_schema()
+                await storage.bulk_upsert_nodes(
+                    [
+                        _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                        _node(
+                            mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True
+                        ),
+                        _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
+                        _node("f-1", "keep.txt", "dir-1"),
+                        _node("f-2", "deleted.txt", "dir-1"),
+                    ]
+                )
+                mounts = {"docs": "/volume1/docs"}
+                network = MagicMock()
 
-            async def _list_children(
-                _nw: object, parent_id: str, _fd: dict[str, str]
-            ) -> list[dict]:
-                if parent_id == "dir-1":
-                    return [_syno_item("f-1", "keep.txt")]
-                return []
+                async def _list_children(_nw: object, parent_id: str) -> list[dict]:
+                    if parent_id == "dir-1":
+                        return [_syno_item("f-1", "keep.txt")]
+                    return []
 
-            with patch(
-                "wcpan.drive.synology.server._reconcile.list_children_for_parent",
-                side_effect=_list_children,
-            ):
-                stats = await reconcile_subtree(
-                    storage, network, folders, "dir-1", dry_run=True
+                stats = await _reconcile_with_worker(
+                    storage,
+                    mounts,
+                    network,
+                    "dir-1",
+                    dry_run=True,
+                    list_children_side_effect=_list_children,
                 )
 
-            self.assertEqual(stats["removed"], 1)
-            self.assertIsNotNone(storage.get_node_by_id("f-2"))
+                self.assertEqual(stats["removed"], 1)
+                self.assertIsNotNone(await storage.get_node_by_id("f-2"))
         finally:
             os.unlink(db_path)

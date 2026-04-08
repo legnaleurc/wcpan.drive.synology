@@ -6,7 +6,7 @@ Each test uses given-when-then sections and unittest assertions.
 from datetime import UTC, datetime
 from unittest import TestCase
 
-from wcpan.drive.synology.lib import (
+from wcpan.drive.synology._lib import (
     FOLDER_MIME_TYPE,
     guess_mime_type,
     node_from_record,

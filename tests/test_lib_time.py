@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from unittest import TestCase
 from unittest.mock import patch
 
-from wcpan.drive.synology.lib import node_record_from_dict, utc_from_timestamp, utc_now
+from wcpan.drive.synology._lib import node_record_from_dict, utc_from_timestamp, utc_now
 
 
 class _FixedDateTime:
@@ -32,7 +32,7 @@ class TestUtcNow(TestCase):
         # given
         fixed = datetime(2022, 6, 15, 12, 30, 0, tzinfo=UTC)
         # when
-        with patch("wcpan.drive.synology.lib.datetime", _FixedDateTime):
+        with patch("wcpan.drive.synology._lib.datetime", _FixedDateTime):
             result = utc_now()
         # then
         self.assertEqual(result, fixed)

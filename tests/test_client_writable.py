@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 
-from wcpan.drive.synology.client._writable import (
+from wcpan.drive.synology._client.writable import (
     _MAX_SPOOL,
     _ResumableWritableFile,
     create_writable,
@@ -23,6 +23,34 @@ def _response_cm(status: int, body: dict) -> MagicMock:
     response.status = status
     response.json = AsyncMock(return_value=body)
     response.raise_for_status = MagicMock()
+    response.headers = {}
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=response)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm
+
+
+def _head_cm(status: int, *, upload_offset: str = "0") -> MagicMock:
+    """Build a mock HEAD response with Upload-Offset header."""
+    response = MagicMock()
+    response.status = status
+    response.raise_for_status = MagicMock()
+    response.headers = {"Upload-Offset": upload_offset}
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=response)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm
+
+
+def _patch_cm(
+    status: int, *, upload_offset: str = "0", body: dict | None = None
+) -> MagicMock:
+    """Build a mock PATCH response."""
+    response = MagicMock()
+    response.status = status
+    response.json = AsyncMock(return_value=body or {})
+    response.raise_for_status = MagicMock()
+    response.headers = {"Upload-Offset": upload_offset}
     cm = MagicMock()
     cm.__aenter__ = AsyncMock(return_value=response)
     cm.__aexit__ = AsyncMock(return_value=False)
@@ -54,17 +82,20 @@ def _make_session(
 ) -> MagicMock:
     """Build a mock aiohttp ClientSession pre-wired for resumable upload."""
     session = MagicMock(spec=aiohttp.ClientSession)
-    # POST /upload-session → 201 {"session_id": ..., "received": 0}
-    session.post = MagicMock(
-        return_value=_response_cm(201, {"session_id": session_id, "received": 0})
-    )
-    # GET /upload-sessions/{id} → 200 {"received": 0}
-    session.get = MagicMock(
-        return_value=_response_cm(200, {"received": 0, "total": total_size})
-    )
-    # PUT /upload-sessions/{id} → 201 with node (successful upload)
-    session.put = MagicMock(return_value=_response_cm(201, _node_dict()))
-    # DELETE /upload-sessions/{id} → 204
+    # POST /nodes/{parent_id}/uploads → 201 + Location header
+    post_resp = MagicMock()
+    post_resp.status = 201
+    post_resp.raise_for_status = MagicMock()
+    post_resp.headers = {"Location": f"/api/v1/uploads/{session_id}"}
+    post_cm = MagicMock()
+    post_cm.__aenter__ = AsyncMock(return_value=post_resp)
+    post_cm.__aexit__ = AsyncMock(return_value=False)
+    session.post = MagicMock(return_value=post_cm)
+    # HEAD /uploads/{id} → 200 with Upload-Offset: 0 (nothing received yet)
+    session.head = MagicMock(return_value=_head_cm(200, upload_offset="0"))
+    # PATCH /uploads/{id} → 201 with node (successful upload)
+    session.patch = MagicMock(return_value=_patch_cm(201, body=_node_dict()))
+    # DELETE /uploads/{id} → 204
     session.delete = MagicMock(return_value=_response_cm(204, {}))
     return session
 
@@ -80,9 +111,8 @@ def _make_writable(
 ) -> _ResumableWritableFile:
     if buf is None:
         buf = tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b")
-    return _ResumableWritableFile(
-        client, "http://srv", session_id, total_size, "f.bin", buf
-    )
+    session_url = f"http://srv/api/v1/uploads/{session_id}"
+    return _ResumableWritableFile(client, session_url, total_size, "f.bin", buf)
 
 
 class TestResumableWritableFileFlush(IsolatedAsyncioTestCase):
@@ -97,13 +127,13 @@ class TestResumableWritableFileFlush(IsolatedAsyncioTestCase):
             await writable.write(data)
             await writable.flush()
 
-            # then — PUT was called with Content-Range covering entire file
+            # then — PATCH was called with Upload-Offset: 0
             node = await writable.node()
         self.assertEqual(node.id, "node-1")
-        client.put.assert_called_once()
-        _, put_kwargs = client.put.call_args
-        self.assertIn("Content-Range", put_kwargs.get("headers", {}))
-        self.assertEqual(put_kwargs["headers"]["Content-Range"], "bytes 0-99/100")
+        client.patch.assert_called_once()
+        _, patch_kwargs = client.patch.call_args
+        self.assertIn("Upload-Offset", patch_kwargs.get("headers", {}))
+        self.assertEqual(patch_kwargs["headers"]["Upload-Offset"], "0")
 
     async def test_flush_is_idempotent(self):
         data = b"y" * 50
@@ -114,42 +144,23 @@ class TestResumableWritableFileFlush(IsolatedAsyncioTestCase):
             await writable.flush()
             # second flush should not re-upload
             await writable.flush()
-        self.assertEqual(client.put.call_count, 1)
+        self.assertEqual(client.patch.call_count, 1)
 
-    async def test_flush_splits_into_chunks(self):
-        # Write more than _CHUNK_SIZE (4 MiB) to force multiple PUTs.
-        from wcpan.drive.synology.client._writable import _CHUNK_SIZE
-
-        total = _CHUNK_SIZE + 1024  # slightly more than one chunk
+    async def test_flush_sends_single_patch(self):
+        total = 1024
         data = b"z" * total
 
         client = _make_session("sid3", total_size=total)
-        # First PUT returns 200 (incomplete), second returns 201 (done).
-        client.put = MagicMock(
-            side_effect=[
-                _response_cm(200, {"received": _CHUNK_SIZE}),
-                _response_cm(201, _node_dict()),
-            ]
-        )
+        client.patch = MagicMock(return_value=_patch_cm(201, body=_node_dict()))
 
         with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
             writable = _make_writable(client, "sid3", total, buf)
             await writable.write(data)
             await writable.flush()
 
-        self.assertEqual(client.put.call_count, 2)
-        # First call: bytes 0-{CHUNK_SIZE-1}/{total}
-        _, kw1 = client.put.call_args_list[0]
-        self.assertEqual(
-            kw1["headers"]["Content-Range"],
-            f"bytes 0-{_CHUNK_SIZE - 1}/{total}",
-        )
-        # Second call: bytes {CHUNK_SIZE}-{total-1}/{total}
-        _, kw2 = client.put.call_args_list[1]
-        self.assertEqual(
-            kw2["headers"]["Content-Range"],
-            f"bytes {_CHUNK_SIZE}-{total - 1}/{total}",
-        )
+        self.assertEqual(client.patch.call_count, 1)
+        _, kw = client.patch.call_args
+        self.assertEqual(kw["headers"]["Upload-Offset"], "0")
 
 
 class TestResumableWritableFileRetry(IsolatedAsyncioTestCase):
@@ -157,59 +168,55 @@ class TestResumableWritableFileRetry(IsolatedAsyncioTestCase):
         # Server says it has 50 bytes when client thought it had 0.
         total = 100
         client = _make_session("sid-mismatch", total_size=total)
-        # First PUT → 409 with server_received=50
-        # Second PUT → 201 (success from offset 50)
-        client.put = MagicMock(
+        # First PATCH → 409 with Upload-Offset showing server has 50 bytes
+        # Second PATCH → 201 (success from offset 50)
+        client.patch = MagicMock(
             side_effect=[
-                _response_cm(409, {"received": 50}),
-                _response_cm(201, _node_dict()),
+                _patch_cm(409, upload_offset="50"),
+                _patch_cm(201, body=_node_dict()),
             ]
         )
-        client.get = MagicMock(
-            return_value=_response_cm(200, {"received": 0, "total": total})
-        )
+        client.head = MagicMock(return_value=_head_cm(200, upload_offset="0"))
 
         with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
             writable = _make_writable(client, "sid-mismatch", total, buf)
             await writable.write(b"a" * 100)
             await writable.flush()
 
-        self.assertEqual(client.put.call_count, 2)
-        # Second PUT must start at offset 50
-        _, kw2 = client.put.call_args_list[1]
-        self.assertEqual(kw2["headers"]["Content-Range"], "bytes 50-99/100")
+        self.assertEqual(client.patch.call_count, 2)
+        # Second PATCH must start at offset 50
+        _, kw2 = client.patch.call_args_list[1]
+        self.assertEqual(kw2["headers"]["Upload-Offset"], "50")
 
     async def test_connection_error_retries_from_server_received(self):
         total = 100
         client = _make_session("sid-retry", total_size=total)
-        # First PUT raises ClientError; second PUT succeeds.
-        client.put = MagicMock(
+        # First PATCH raises ClientError; second PATCH succeeds.
+        client.patch = MagicMock(
             side_effect=[
                 _cm_raises(aiohttp.ClientError("connection reset")),
-                _response_cm(201, _node_dict()),
+                _patch_cm(201, body=_node_dict()),
             ]
         )
-        # GET → server received 40 bytes before the drop
-        client.get = MagicMock(
-            return_value=_response_cm(200, {"received": 40, "total": total})
-        )
+        # HEAD → server received 40 bytes before the drop
+        client.head = MagicMock(return_value=_head_cm(200, upload_offset="40"))
 
         with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
             writable = _make_writable(client, "sid-retry", total, buf)
             await writable.write(b"b" * 100)
             with patch("asyncio.sleep", new_callable=AsyncMock):
                 with self.assertLogs(
-                    "wcpan.drive.synology.client._writable", "WARNING"
+                    "wcpan.drive.synology._client.writable", "WARNING"
                 ):
                     await writable.flush()
 
-        self.assertEqual(client.put.call_count, 2)
-        _, kw2 = client.put.call_args_list[1]
-        self.assertEqual(kw2["headers"]["Content-Range"], "bytes 40-99/100")
+        self.assertEqual(client.patch.call_count, 2)
+        _, kw2 = client.patch.call_args_list[1]
+        self.assertEqual(kw2["headers"]["Upload-Offset"], "40")
 
     async def test_503_raises_upload_error_without_retry(self):
         client = _make_session("sid-503", total_size=50)
-        client.put = MagicMock(return_value=_response_cm(503, {}))
+        client.patch = MagicMock(return_value=_response_cm(503, {}))
 
         with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
             writable = _make_writable(client, "sid-503", 50, buf)
@@ -218,11 +225,11 @@ class TestResumableWritableFileRetry(IsolatedAsyncioTestCase):
                 await writable.flush()
 
         # Must not retry on 503
-        self.assertEqual(client.put.call_count, 1)
+        self.assertEqual(client.patch.call_count, 1)
 
     async def test_404_raises_upload_error(self):
         client = _make_session("sid-404", total_size=50)
-        client.put = MagicMock(return_value=_response_cm(404, {}))
+        client.patch = MagicMock(return_value=_response_cm(404, {}))
 
         with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
             writable = _make_writable(client, "sid-404", 50, buf)
@@ -231,26 +238,24 @@ class TestResumableWritableFileRetry(IsolatedAsyncioTestCase):
                 await writable.flush()
 
     async def test_exceeds_max_retries_raises_upload_error(self):
-        from wcpan.drive.synology.client._writable import _MAX_RETRIES
+        from wcpan.drive.synology._client.writable import _MAX_RETRIES
 
         total = 50
         client = _make_session("sid-maxretry", total_size=total)
-        client.put = MagicMock(return_value=_cm_raises(aiohttp.ClientError("drop")))
-        client.get = MagicMock(
-            return_value=_response_cm(200, {"received": 0, "total": total})
-        )
+        client.patch = MagicMock(return_value=_cm_raises(aiohttp.ClientError("drop")))
+        client.head = MagicMock(return_value=_head_cm(200, upload_offset="0"))
 
         with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
             writable = _make_writable(client, "sid-maxretry", total, buf)
             await writable.write(b"e" * total)
             with patch("asyncio.sleep", new_callable=AsyncMock):
                 with self.assertLogs(
-                    "wcpan.drive.synology.client._writable", "WARNING"
+                    "wcpan.drive.synology._client.writable", "WARNING"
                 ):
                     with self.assertRaises(SynologyUploadError):
                         await writable.flush()
 
-        self.assertEqual(client.put.call_count, _MAX_RETRIES)
+        self.assertEqual(client.patch.call_count, _MAX_RETRIES)
 
 
 # ---------- create_writable ----------
@@ -268,10 +273,11 @@ class TestCreateWritable(IsolatedAsyncioTestCase):
             mime_type=None,
         ) as w:
             await w.write(b"a" * 50)
-        # session initiation via POST
+        # session initiation via POST with JSON body
         client.post.assert_called_once()
-        args, _ = client.post.call_args
-        self.assertIn("upload-session", args[0])
+        args, kwargs = client.post.call_args
+        self.assertIn("/uploads", args[0])
+        self.assertIn("json", kwargs)
 
     async def test_size_zero_uses_empty_path(self):
         client = MagicMock(spec=aiohttp.ClientSession)
@@ -294,10 +300,10 @@ class TestCreateWritable(IsolatedAsyncioTestCase):
         ) as w:
             pass  # no writes for empty file
 
-        # Must use the non-session upload endpoint
+        # Must POST to /api/v1/nodes/{parent_id} (no /uploads suffix)
         args, _ = client.post.call_args
-        self.assertIn("/upload", args[0])
-        self.assertNotIn("upload-session", args[0])
+        self.assertIn("/api/v1/nodes/par", args[0])
+        self.assertNotIn("/uploads", args[0])
 
     async def test_exception_cancels_session(self):
         client = _make_session("sess-cancel", total_size=100)

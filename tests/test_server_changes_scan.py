@@ -1,22 +1,29 @@
-"""Tests for deferred deletion in ``scan_all_mounts``."""
+"""Tests for deferred deletion in ``StartupScanService._scan_all_mounts``."""
 
 import asyncio
 import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from datetime import UTC, datetime
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from wcpan.drive.synology.lib import FOLDER_MIME_TYPE
-from wcpan.drive.synology.server._api import changes as changes_mod
-from wcpan.drive.synology.server._api.changes import scan_all_mounts
-from wcpan.drive.synology.server._db import Storage
-from wcpan.drive.synology.server._lib import OffMainThread
-from wcpan.drive.synology.server._types import WriteQueue
-from wcpan.drive.synology.server._virtual_ids import SERVER_ROOT_ID, mount_id
-from wcpan.drive.synology.server._workers import create_write_queue
+import wcpan.drive.synology._server.services.scan as startup_scan_mod
+from wcpan.drive.synology._lib import FOLDER_MIME_TYPE
+from wcpan.drive.synology._server.lib.mounts import (
+    SERVER_ROOT_ID,
+    MountRegistry,
+    mount_id,
+    mount_name,
+)
+from wcpan.drive.synology._server.services.off_main import OffMainThreadService
+from wcpan.drive.synology._server.services.paths import SynologyPathService
+from wcpan.drive.synology._server.services.scan import StartupScanService
+from wcpan.drive.synology._server.services.storage import StorageService
+from wcpan.drive.synology._server.services.sync import NodeSyncService
+from wcpan.drive.synology._server.types import WriteQueue
+from wcpan.drive.synology._server.workers import create_write_queue, metadata_worker
 from wcpan.drive.synology.types import NodeRecord
 
 
@@ -69,17 +76,58 @@ def _syno_item(
     }
 
 
-async def _noop_enrich(record: NodeRecord, *args, **kwargs) -> NodeRecord:
+async def _noop_enrich_node_sync(_self: object, record: NodeRecord) -> NodeRecord:
     return record
 
 
 class TestDeferredScan(IsolatedAsyncioTestCase):
-    async def _drain_writes(self, q: WriteQueue, off_main: OffMainThread) -> None:
+    def _push_incremental_scan_mocks(
+        self,
+        stack: ExitStack,
+        *,
+        by_path,
+        list_all=None,
+        list_folder_fn=None,
+        mute_tree_log_exception: bool = False,
+    ) -> None:
+        async def api_children(_self_svc: object, _net: object, parent_id: str) -> list:
+            mkey = mount_name(parent_id)
+            if mkey is not None:
+                mounts = _self_svc.mounts  # type: ignore[union-attr]
+                return await by_path(_net, mounts[mkey])
+            if list_all is None:
+                raise AssertionError(f"unexpected deep listing for {parent_id!r}")
+            return await list_all(_net, parent_id)
+
+        stack.enter_context(
+            patch.object(
+                SynologyPathService,
+                "list_children",
+                new=api_children,
+            )
+        )
+        stack.enter_context(
+            patch.object(NodeSyncService, "enrich", new=_noop_enrich_node_sync)
+        )
+        if list_folder_fn is not None:
+            stack.enter_context(
+                patch.object(
+                    startup_scan_mod,
+                    "list_folder",
+                    new=AsyncMock(side_effect=list_folder_fn),
+                )
+            )
+        if mute_tree_log_exception:
+            stack.enter_context(
+                patch.object(startup_scan_mod._L, "exception", MagicMock())
+            )
+
+    async def _drain_writes(self, q: WriteQueue) -> None:
         try:
             while True:
                 job = await q.get()
                 try:
-                    await off_main(job)
+                    await job()
                 finally:
                     q.task_done()
         except asyncio.CancelledError:
@@ -89,64 +137,63 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         try:
-            storage = Storage(db_path)
-            storage.ensure_schema()
-            storage.bulk_upsert_nodes(
-                [
-                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
-                    _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
-                    _node(mount_id("b"), "b", SERVER_ROOT_ID, is_directory=True),
-                    _node("x1", "moved.txt", mount_id("a")),
-                ]
-            )
-
-            async def by_path(_net, path: str) -> list:
-                if path == "/vol/a":
-                    return []
-                if path == "/vol/b":
-                    return [_syno_item("x1", "moved.txt", is_dir=False)]
-                return []
-
-            q = create_write_queue()
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThread(pool)
-                drain = asyncio.create_task(self._drain_writes(q, off_main))
+                off_main = OffMainThreadService(pool)
+                storage = StorageService(db_path, off_main)
+                await storage.ensure_schema()
+                await storage.bulk_upsert_nodes(
+                    [
+                        _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                        _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
+                        _node(mount_id("b"), "b", SERVER_ROOT_ID, is_directory=True),
+                        _node("x1", "moved.txt", mount_id("a")),
+                    ]
+                )
+
+                async def by_path(_net: object, path: str) -> list:
+                    if path == "/vol/a":
+                        return []
+                    if path == "/vol/b":
+                        return [_syno_item("x1", "moved.txt", is_dir=False)]
+                    return []
+
+                q = create_write_queue()
+                mq: asyncio.Queue = asyncio.Queue()
+                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                drain = asyncio.create_task(self._drain_writes(q))
+                meta_drain = asyncio.create_task(
+                    metadata_worker(mq, cs.process_metadata_item)
+                )
                 try:
-                    with (
-                        patch.object(
-                            changes_mod,
-                            "list_folder_all_by_path",
-                            new=AsyncMock(side_effect=by_path),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "enrich_media_before_upsert",
-                            new=_noop_enrich,
-                        ),
-                    ):
-                        await scan_all_mounts(
+                    with ExitStack() as stack:
+                        self._push_incremental_scan_mocks(stack, by_path=by_path)
+                        svc = StartupScanService(
                             network=None,  # type: ignore[arg-type]
                             storage=storage,
-                            folders={"a": "/vol/a", "b": "/vol/b"},
-                            last_max_ids={"a": 50, "b": 50},
-                            volume_map=None,
-                            off_main=off_main,
-                            write_queue=q,
+                            syno_paths=SynologyPathService(
+                                MountRegistry({"a": "/vol/a", "b": "/vol/b"}, {})
+                            ),
+                            node_sync=cs,
                         )
+                        await svc._scan_all_mounts({"a": 50, "b": 50})
                 finally:
+                    await mq.join()
                     await q.join()
+                    meta_drain.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await meta_drain
                     drain.cancel()
                     with suppress(asyncio.CancelledError):
                         await drain
 
-            row = storage.get_node_by_id("x1")
-            self.assertIsNotNone(row)
-            assert row is not None
-            self.assertEqual(row.parent_id, mount_id("b"))
+                row = await storage.get_node_by_id("x1")
+                self.assertIsNotNone(row)
+                assert row is not None
+                self.assertEqual(row.parent_id, mount_id("b"))
 
-            changes, _, _ = storage.get_changes_since(0, max_size=500)
-            x1_removes = [c for c in changes if c[0] == "x1" and c[1] is True]
-            self.assertEqual(x1_removes, [])
+                changes, _, _ = await storage.get_changes_since(0, max_size=500)
+                x1_removes = [c for c in changes if c[0] == "x1" and c[1] is True]
+                self.assertEqual(x1_removes, [])
         finally:
             os.unlink(db_path)
 
@@ -154,75 +201,70 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         try:
-            storage = Storage(db_path)
-            storage.ensure_schema()
-            storage.bulk_upsert_nodes(
-                [
-                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
-                    _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
-                    _node("dirF", "F", mount_id("a"), is_directory=True),
-                    _node("childC", "c.txt", "dirF"),
-                ]
-            )
-
-            async def by_path(_net, path: str) -> list:
-                if path == "/vol/a":
-                    return [_syno_item("dirF", "F", is_dir=True, sync_id=10, max_id=10)]
-                return []
-
-            async def list_all(_net, folder_id: str) -> list:
-                raise AssertionError(f"unexpected list of {folder_id}")
-
-            # Count matches DB (1 child) → folder is safely skipped
-            async def list_folder_fn(
-                _net, folder_id: str, offset: int, limit: int
-            ) -> tuple:
-                return [], 1
-
-            q = create_write_queue()
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThread(pool)
-                drain = asyncio.create_task(self._drain_writes(q, off_main))
+                off_main = OffMainThreadService(pool)
+                storage = StorageService(db_path, off_main)
+                await storage.ensure_schema()
+                await storage.bulk_upsert_nodes(
+                    [
+                        _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                        _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
+                        _node("dirF", "F", mount_id("a"), is_directory=True),
+                        _node("childC", "c.txt", "dirF"),
+                    ]
+                )
+
+                async def by_path(_net: object, path: str) -> list:
+                    if path == "/vol/a":
+                        return [
+                            _syno_item("dirF", "F", is_dir=True, sync_id=10, max_id=10)
+                        ]
+                    return []
+
+                async def list_all(_net: object, folder_id: str) -> list:
+                    raise AssertionError(f"unexpected list of {folder_id}")
+
+                async def list_folder_fn(
+                    _net: object, folder_id: str, offset: int, limit: int
+                ) -> tuple:
+                    return [], 1
+
+                q = create_write_queue()
+                mq: asyncio.Queue = asyncio.Queue()
+                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                drain = asyncio.create_task(self._drain_writes(q))
+                meta_drain = asyncio.create_task(
+                    metadata_worker(mq, cs.process_metadata_item)
+                )
                 try:
-                    with (
-                        patch.object(
-                            changes_mod,
-                            "list_folder_all_by_path",
-                            new=AsyncMock(side_effect=by_path),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "list_folder_all",
-                            new=AsyncMock(side_effect=list_all),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "list_folder",
-                            new=AsyncMock(side_effect=list_folder_fn),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "enrich_media_before_upsert",
-                            new=_noop_enrich,
-                        ),
-                    ):
-                        await scan_all_mounts(
+                    with ExitStack() as stack:
+                        self._push_incremental_scan_mocks(
+                            stack,
+                            by_path=by_path,
+                            list_all=list_all,
+                            list_folder_fn=list_folder_fn,
+                        )
+                        svc = StartupScanService(
                             network=None,  # type: ignore[arg-type]
                             storage=storage,
-                            folders={"a": "/vol/a"},
-                            last_max_ids={"a": 100},
-                            volume_map=None,
-                            off_main=off_main,
-                            write_queue=q,
+                            syno_paths=SynologyPathService(
+                                MountRegistry({"a": "/vol/a"}, {})
+                            ),
+                            node_sync=cs,
                         )
+                        await svc._scan_all_mounts({"a": 100})
                 finally:
+                    await mq.join()
                     await q.join()
+                    meta_drain.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await meta_drain
                     drain.cancel()
                     with suppress(asyncio.CancelledError):
                         await drain
 
-            self.assertIsNotNone(storage.get_node_by_id("dirF"))
-            self.assertIsNotNone(storage.get_node_by_id("childC"))
+                self.assertIsNotNone(await storage.get_node_by_id("dirF"))
+                self.assertIsNotNone(await storage.get_node_by_id("childC"))
         finally:
             os.unlink(db_path)
 
@@ -231,136 +273,126 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         try:
-            storage = Storage(db_path)
-            storage.ensure_schema()
-            storage.bulk_upsert_nodes(
-                [
-                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
-                    _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
-                ]
-            )
-
-            async def by_path(_net, path: str) -> list:
-                if path == "/vol/a":
-                    return [_syno_item("dirF", "F", is_dir=True, sync_id=0, max_id=0)]
-                return []
-
-            async def list_all(_net, folder_id: str) -> list:
-                if folder_id == "dirF":
-                    return [_syno_item("childC", "c.txt", sync_id=0)]
-                return []
-
-            q = create_write_queue()
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThread(pool)
-                drain = asyncio.create_task(self._drain_writes(q, off_main))
+                off_main = OffMainThreadService(pool)
+                storage = StorageService(db_path, off_main)
+                await storage.ensure_schema()
+                await storage.bulk_upsert_nodes(
+                    [
+                        _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                        _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
+                    ]
+                )
+
+                async def by_path(_net: object, path: str) -> list:
+                    if path == "/vol/a":
+                        return [
+                            _syno_item("dirF", "F", is_dir=True, sync_id=0, max_id=0)
+                        ]
+                    return []
+
+                async def list_all(_net: object, folder_id: str) -> list:
+                    if folder_id == "dirF":
+                        return [_syno_item("childC", "c.txt", sync_id=0)]
+                    return []
+
+                q = create_write_queue()
+                mq: asyncio.Queue = asyncio.Queue()
+                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                drain = asyncio.create_task(self._drain_writes(q))
+                meta_drain = asyncio.create_task(
+                    metadata_worker(mq, cs.process_metadata_item)
+                )
                 try:
-                    with (
-                        patch.object(
-                            changes_mod,
-                            "list_folder_all_by_path",
-                            new=AsyncMock(side_effect=by_path),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "list_folder_all",
-                            new=AsyncMock(side_effect=list_all),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "enrich_media_before_upsert",
-                            new=_noop_enrich,
-                        ),
-                    ):
-                        await scan_all_mounts(
+                    with ExitStack() as stack:
+                        self._push_incremental_scan_mocks(
+                            stack, by_path=by_path, list_all=list_all
+                        )
+                        svc = StartupScanService(
                             network=None,  # type: ignore[arg-type]
                             storage=storage,
-                            folders={"a": "/vol/a"},
-                            last_max_ids={"a": 0},
-                            volume_map=None,
-                            off_main=off_main,
-                            write_queue=q,
+                            syno_paths=SynologyPathService(
+                                MountRegistry({"a": "/vol/a"}, {})
+                            ),
+                            node_sync=cs,
                         )
+                        await svc._scan_all_mounts({"a": 0})
                 finally:
+                    await mq.join()
                     await q.join()
+                    meta_drain.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await meta_drain
                     drain.cancel()
                     with suppress(asyncio.CancelledError):
                         await drain
 
-            self.assertIsNotNone(storage.get_node_by_id("dirF"))
-            self.assertIsNotNone(storage.get_node_by_id("childC"))
+                self.assertIsNotNone(await storage.get_node_by_id("dirF"))
+                self.assertIsNotNone(await storage.get_node_by_id("childC"))
         finally:
             os.unlink(db_path)
 
     async def test_new_folder_with_stale_max_id_is_force_scanned(self) -> None:
-        """A folder absent from DB must be entered even when max_id <= last_max_id.
-
-        Scenario: folder was added while the server was down and other activity
-        pushed last_max_id past the folder's max_id before the next scan.
-        """
+        """A folder absent from DB must be entered even when max_id <= last_max_id."""
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         try:
-            storage = Storage(db_path)
-            storage.ensure_schema()
-            storage.bulk_upsert_nodes(
-                [
-                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
-                    _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
-                ]
-            )
-
-            # dirF has max_id=50 which is less than last_max_id=100,
-            # but it has never been scanned (not in DB).
-            async def by_path(_net, path: str) -> list:
-                if path == "/vol/a":
-                    return [_syno_item("dirF", "F", is_dir=True, sync_id=40, max_id=50)]
-                return []
-
-            async def list_all(_net, folder_id: str) -> list:
-                if folder_id == "dirF":
-                    return [_syno_item("childC", "c.txt", sync_id=50)]
-                return []
-
-            q = create_write_queue()
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThread(pool)
-                drain = asyncio.create_task(self._drain_writes(q, off_main))
+                off_main = OffMainThreadService(pool)
+                storage = StorageService(db_path, off_main)
+                await storage.ensure_schema()
+                await storage.bulk_upsert_nodes(
+                    [
+                        _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                        _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
+                    ]
+                )
+
+                async def by_path(_net: object, path: str) -> list:
+                    if path == "/vol/a":
+                        return [
+                            _syno_item("dirF", "F", is_dir=True, sync_id=40, max_id=50)
+                        ]
+                    return []
+
+                async def list_all(_net: object, folder_id: str) -> list:
+                    if folder_id == "dirF":
+                        return [_syno_item("childC", "c.txt", sync_id=50)]
+                    return []
+
+                q = create_write_queue()
+                mq: asyncio.Queue = asyncio.Queue()
+                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                drain = asyncio.create_task(self._drain_writes(q))
+                meta_drain = asyncio.create_task(
+                    metadata_worker(mq, cs.process_metadata_item)
+                )
                 try:
-                    with (
-                        patch.object(
-                            changes_mod,
-                            "list_folder_all_by_path",
-                            new=AsyncMock(side_effect=by_path),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "list_folder_all",
-                            new=AsyncMock(side_effect=list_all),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "enrich_media_before_upsert",
-                            new=_noop_enrich,
-                        ),
-                    ):
-                        await scan_all_mounts(
+                    with ExitStack() as stack:
+                        self._push_incremental_scan_mocks(
+                            stack, by_path=by_path, list_all=list_all
+                        )
+                        svc = StartupScanService(
                             network=None,  # type: ignore[arg-type]
                             storage=storage,
-                            folders={"a": "/vol/a"},
-                            last_max_ids={"a": 100},
-                            volume_map=None,
-                            off_main=off_main,
-                            write_queue=q,
+                            syno_paths=SynologyPathService(
+                                MountRegistry({"a": "/vol/a"}, {})
+                            ),
+                            node_sync=cs,
                         )
+                        await svc._scan_all_mounts({"a": 100})
                 finally:
+                    await mq.join()
                     await q.join()
+                    meta_drain.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await meta_drain
                     drain.cancel()
                     with suppress(asyncio.CancelledError):
                         await drain
 
-            self.assertIsNotNone(storage.get_node_by_id("dirF"))
-            self.assertIsNotNone(storage.get_node_by_id("childC"))
+                self.assertIsNotNone(await storage.get_node_by_id("dirF"))
+                self.assertIsNotNone(await storage.get_node_by_id("childC"))
         finally:
             os.unlink(db_path)
 
@@ -370,67 +402,63 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         try:
-            storage = Storage(db_path)
-            storage.ensure_schema()
-            # dirF is in DB but has NO children — it was added at mount level
-            # but BFS skipped it in a prior scan.
-            storage.bulk_upsert_nodes(
-                [
-                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
-                    _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
-                    _node("dirF", "F", mount_id("a"), is_directory=True),
-                ]
-            )
-
-            async def by_path(_net, path: str) -> list:
-                if path == "/vol/a":
-                    return [_syno_item("dirF", "F", is_dir=True, sync_id=40, max_id=50)]
-                return []
-
-            async def list_all(_net, folder_id: str) -> list:
-                if folder_id == "dirF":
-                    return [_syno_item("childC", "c.txt", sync_id=50)]
-                return []
-
-            q = create_write_queue()
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThread(pool)
-                drain = asyncio.create_task(self._drain_writes(q, off_main))
+                off_main = OffMainThreadService(pool)
+                storage = StorageService(db_path, off_main)
+                await storage.ensure_schema()
+                await storage.bulk_upsert_nodes(
+                    [
+                        _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                        _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
+                        _node("dirF", "F", mount_id("a"), is_directory=True),
+                    ]
+                )
+
+                async def by_path(_net: object, path: str) -> list:
+                    if path == "/vol/a":
+                        return [
+                            _syno_item("dirF", "F", is_dir=True, sync_id=40, max_id=50)
+                        ]
+                    return []
+
+                async def list_all(_net: object, folder_id: str) -> list:
+                    if folder_id == "dirF":
+                        return [_syno_item("childC", "c.txt", sync_id=50)]
+                    return []
+
+                q = create_write_queue()
+                mq: asyncio.Queue = asyncio.Queue()
+                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                drain = asyncio.create_task(self._drain_writes(q))
+                meta_drain = asyncio.create_task(
+                    metadata_worker(mq, cs.process_metadata_item)
+                )
                 try:
-                    with (
-                        patch.object(
-                            changes_mod,
-                            "list_folder_all_by_path",
-                            new=AsyncMock(side_effect=by_path),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "list_folder_all",
-                            new=AsyncMock(side_effect=list_all),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "enrich_media_before_upsert",
-                            new=_noop_enrich,
-                        ),
-                    ):
-                        await scan_all_mounts(
+                    with ExitStack() as stack:
+                        self._push_incremental_scan_mocks(
+                            stack, by_path=by_path, list_all=list_all
+                        )
+                        svc = StartupScanService(
                             network=None,  # type: ignore[arg-type]
                             storage=storage,
-                            folders={"a": "/vol/a"},
-                            last_max_ids={"a": 100},
-                            volume_map=None,
-                            off_main=off_main,
-                            write_queue=q,
+                            syno_paths=SynologyPathService(
+                                MountRegistry({"a": "/vol/a"}, {})
+                            ),
+                            node_sync=cs,
                         )
+                        await svc._scan_all_mounts({"a": 100})
                 finally:
+                    await mq.join()
                     await q.join()
+                    meta_drain.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await meta_drain
                     drain.cancel()
                     with suppress(asyncio.CancelledError):
                         await drain
 
-            self.assertIsNotNone(storage.get_node_by_id("dirF"))
-            self.assertIsNotNone(storage.get_node_by_id("childC"))
+                self.assertIsNotNone(await storage.get_node_by_id("dirF"))
+                self.assertIsNotNone(await storage.get_node_by_id("childC"))
         finally:
             os.unlink(db_path)
 
@@ -438,70 +466,69 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         try:
-            storage = Storage(db_path)
-            storage.ensure_schema()
-            storage.bulk_upsert_nodes(
-                [
-                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
-                    _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
-                    _node("dirF", "F", mount_id("a"), is_directory=True),
-                    _node("childC", "c.txt", "dirF"),
-                ]
-            )
-
-            async def by_path(_net, path: str) -> list:
-                if path == "/vol/a":
-                    return [
-                        _syno_item("dirF", "F", is_dir=True, sync_id=200, max_id=200)
-                    ]
-                return []
-
-            async def list_all(_net, folder_id: str) -> list:
-                if folder_id == "dirF":
-                    raise OSError("boom")
-                return []
-
-            q = create_write_queue()
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThread(pool)
-                drain = asyncio.create_task(self._drain_writes(q, off_main))
+                off_main = OffMainThreadService(pool)
+                storage = StorageService(db_path, off_main)
+                await storage.ensure_schema()
+                await storage.bulk_upsert_nodes(
+                    [
+                        _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                        _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
+                        _node("dirF", "F", mount_id("a"), is_directory=True),
+                        _node("childC", "c.txt", "dirF"),
+                    ]
+                )
+
+                async def by_path(_net: object, path: str) -> list:
+                    if path == "/vol/a":
+                        return [
+                            _syno_item(
+                                "dirF", "F", is_dir=True, sync_id=200, max_id=200
+                            )
+                        ]
+                    return []
+
+                async def list_all(_net: object, folder_id: str) -> list:
+                    if folder_id == "dirF":
+                        raise OSError("boom")
+                    return []
+
+                q = create_write_queue()
+                mq: asyncio.Queue = asyncio.Queue()
+                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                drain = asyncio.create_task(self._drain_writes(q))
+                meta_drain = asyncio.create_task(
+                    metadata_worker(mq, cs.process_metadata_item)
+                )
                 try:
-                    with (
-                        patch.object(
-                            changes_mod,
-                            "list_folder_all_by_path",
-                            new=AsyncMock(side_effect=by_path),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "list_folder_all",
-                            new=AsyncMock(side_effect=list_all),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "enrich_media_before_upsert",
-                            new=_noop_enrich,
-                        ),
-                        # list_folder_all fails by design; avoid ERROR traceback on stderr
-                        patch.object(changes_mod._L, "exception", MagicMock()),
-                    ):
-                        await scan_all_mounts(
+                    with ExitStack() as stack:
+                        self._push_incremental_scan_mocks(
+                            stack,
+                            by_path=by_path,
+                            list_all=list_all,
+                            mute_tree_log_exception=True,
+                        )
+                        svc = StartupScanService(
                             network=None,  # type: ignore[arg-type]
                             storage=storage,
-                            folders={"a": "/vol/a"},
-                            last_max_ids={"a": 50},
-                            volume_map=None,
-                            off_main=off_main,
-                            write_queue=q,
+                            syno_paths=SynologyPathService(
+                                MountRegistry({"a": "/vol/a"}, {})
+                            ),
+                            node_sync=cs,
                         )
+                        await svc._scan_all_mounts({"a": 50})
                 finally:
+                    await mq.join()
                     await q.join()
+                    meta_drain.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await meta_drain
                     drain.cancel()
                     with suppress(asyncio.CancelledError):
                         await drain
 
-            self.assertIsNotNone(storage.get_node_by_id("dirF"))
-            self.assertIsNotNone(storage.get_node_by_id("childC"))
+                self.assertIsNotNone(await storage.get_node_by_id("dirF"))
+                self.assertIsNotNone(await storage.get_node_by_id("childC"))
         finally:
             os.unlink(db_path)
 
@@ -510,81 +537,75 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         try:
-            storage = Storage(db_path)
-            storage.ensure_schema()
-            storage.bulk_upsert_nodes(
-                [
-                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
-                    _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
-                    _node("dirF", "F", mount_id("a"), is_directory=True),
-                    _node("child1", "a.txt", "dirF"),
-                    _node("child2", "b.txt", "dirF"),  # deleted from Synology
-                ]
-            )
-
-            async def by_path(_net, path: str) -> list:
-                if path == "/vol/a":
-                    return [_syno_item("dirF", "F", is_dir=True, sync_id=10, max_id=10)]
-                return []
-
-            # API only has 1 child remaining
-            async def list_all(_net, folder_id: str) -> list:
-                if folder_id == "dirF":
-                    return [_syno_item("child1", "a.txt")]
-                return []
-
-            # Count-check: DB has 2 children, API total is 1
-            async def list_folder_fn(
-                _net, folder_id: str, offset: int, limit: int
-            ) -> tuple:
-                if folder_id == "dirF":
-                    return [], 1
-                return [], 0
-
-            q = create_write_queue()
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThread(pool)
-                drain = asyncio.create_task(self._drain_writes(q, off_main))
+                off_main = OffMainThreadService(pool)
+                storage = StorageService(db_path, off_main)
+                await storage.ensure_schema()
+                await storage.bulk_upsert_nodes(
+                    [
+                        _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                        _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
+                        _node("dirF", "F", mount_id("a"), is_directory=True),
+                        _node("child1", "a.txt", "dirF"),
+                        _node("child2", "b.txt", "dirF"),
+                    ]
+                )
+
+                async def by_path(_net: object, path: str) -> list:
+                    if path == "/vol/a":
+                        return [
+                            _syno_item("dirF", "F", is_dir=True, sync_id=10, max_id=10)
+                        ]
+                    return []
+
+                async def list_all(_net: object, folder_id: str) -> list:
+                    if folder_id == "dirF":
+                        return [_syno_item("child1", "a.txt")]
+                    return []
+
+                async def list_folder_fn(
+                    _net: object, folder_id: str, offset: int, limit: int
+                ) -> tuple:
+                    if folder_id == "dirF":
+                        return [], 1
+                    return [], 0
+
+                q = create_write_queue()
+                mq: asyncio.Queue = asyncio.Queue()
+                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                drain = asyncio.create_task(self._drain_writes(q))
+                meta_drain = asyncio.create_task(
+                    metadata_worker(mq, cs.process_metadata_item)
+                )
                 try:
-                    with (
-                        patch.object(
-                            changes_mod,
-                            "list_folder_all_by_path",
-                            new=AsyncMock(side_effect=by_path),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "list_folder_all",
-                            new=AsyncMock(side_effect=list_all),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "list_folder",
-                            new=AsyncMock(side_effect=list_folder_fn),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "enrich_media_before_upsert",
-                            new=_noop_enrich,
-                        ),
-                    ):
-                        await scan_all_mounts(
+                    with ExitStack() as stack:
+                        self._push_incremental_scan_mocks(
+                            stack,
+                            by_path=by_path,
+                            list_all=list_all,
+                            list_folder_fn=list_folder_fn,
+                        )
+                        svc = StartupScanService(
                             network=None,  # type: ignore[arg-type]
                             storage=storage,
-                            folders={"a": "/vol/a"},
-                            last_max_ids={"a": 100},
-                            volume_map=None,
-                            off_main=off_main,
-                            write_queue=q,
+                            syno_paths=SynologyPathService(
+                                MountRegistry({"a": "/vol/a"}, {})
+                            ),
+                            node_sync=cs,
                         )
+                        await svc._scan_all_mounts({"a": 100})
                 finally:
+                    await mq.join()
                     await q.join()
+                    meta_drain.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await meta_drain
                     drain.cancel()
                     with suppress(asyncio.CancelledError):
                         await drain
 
-            self.assertIsNotNone(storage.get_node_by_id("child1"))
-            self.assertIsNone(storage.get_node_by_id("child2"))
+                self.assertIsNotNone(await storage.get_node_by_id("child1"))
+                self.assertIsNone(await storage.get_node_by_id("child2"))
         finally:
             os.unlink(db_path)
 
@@ -593,59 +614,59 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         try:
-            storage = Storage(db_path)
-            storage.ensure_schema()
-            storage.bulk_upsert_nodes(
-                [
-                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
-                    _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
-                    _node(mount_id("b"), "b", SERVER_ROOT_ID, is_directory=True),
-                ]
-            )
-
-            async def by_path(_net, path: str) -> list:
-                if path == "/vol/a":
-                    raise OSError("mount a unavailable")
-                # mount b has a new item with sync_id=200
-                return [_syno_item("f1", "file.txt", sync_id=200)]
-
-            q = create_write_queue()
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThread(pool)
-                drain = asyncio.create_task(self._drain_writes(q, off_main))
+                off_main = OffMainThreadService(pool)
+                storage = StorageService(db_path, off_main)
+                await storage.ensure_schema()
+                await storage.bulk_upsert_nodes(
+                    [
+                        _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                        _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
+                        _node(mount_id("b"), "b", SERVER_ROOT_ID, is_directory=True),
+                    ]
+                )
+
+                async def by_path(_net: object, path: str) -> list:
+                    if path == "/vol/a":
+                        raise OSError("mount a unavailable")
+                    return [_syno_item("f1", "file.txt", sync_id=200)]
+
+                q = create_write_queue()
+                mq: asyncio.Queue = asyncio.Queue()
+                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                drain = asyncio.create_task(self._drain_writes(q))
+                meta_drain = asyncio.create_task(
+                    metadata_worker(mq, cs.process_metadata_item)
+                )
                 try:
-                    with (
-                        patch.object(
-                            changes_mod,
-                            "list_folder_all_by_path",
-                            new=AsyncMock(side_effect=by_path),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "enrich_media_before_upsert",
-                            new=_noop_enrich,
-                        ),
-                        patch.object(changes_mod._L, "exception", MagicMock()),
-                    ):
-                        result = await scan_all_mounts(
+                    with ExitStack() as stack:
+                        self._push_incremental_scan_mocks(
+                            stack,
+                            by_path=by_path,
+                            mute_tree_log_exception=True,
+                        )
+                        svc = StartupScanService(
                             network=None,  # type: ignore[arg-type]
                             storage=storage,
-                            folders={"a": "/vol/a", "b": "/vol/b"},
-                            last_max_ids={"a": 100, "b": 100},
-                            volume_map=None,
-                            off_main=off_main,
-                            write_queue=q,
+                            syno_paths=SynologyPathService(
+                                MountRegistry({"a": "/vol/a", "b": "/vol/b"}, {})
+                            ),
+                            node_sync=cs,
                         )
+                        result = await svc._scan_all_mounts({"a": 100, "b": 100})
                 finally:
+                    await mq.join()
                     await q.join()
+                    meta_drain.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await meta_drain
                     drain.cancel()
                     with suppress(asyncio.CancelledError):
                         await drain
 
-            # mount a failed: its value must stay at the input (100), not advance
-            self.assertEqual(result["a"], 100)
-            # mount b succeeded: its value advances to 200
-            self.assertEqual(result["b"], 200)
+                per_mount_highest, _ = result
+                self.assertEqual(per_mount_highest["a"], 100)
+                self.assertEqual(per_mount_highest["b"], 200)
         finally:
             os.unlink(db_path)
 
@@ -654,83 +675,79 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         fd, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         try:
-            storage = Storage(db_path)
-            storage.ensure_schema()
-            # Both mounts have a subfolder "dirX" with max_id=80 already in DB.
-            storage.bulk_upsert_nodes(
-                [
-                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
-                    _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
-                    _node(mount_id("b"), "b", SERVER_ROOT_ID, is_directory=True),
-                    _node("dirX_a", "X", mount_id("a"), is_directory=True),
-                    _node("child_a", "c.txt", "dirX_a"),
-                    _node("dirX_b", "X", mount_id("b"), is_directory=True),
-                    _node("child_b", "c.txt", "dirX_b"),
-                ]
-            )
-
-            entered: list[str] = []
-
-            async def by_path(_net, path: str) -> list:
-                if path == "/vol/a":
-                    return [
-                        _syno_item("dirX_a", "X", is_dir=True, sync_id=50, max_id=80)
-                    ]
-                return [_syno_item("dirX_b", "X", is_dir=True, sync_id=50, max_id=80)]
-
-            async def list_all(_net, folder_id: str) -> list:
-                entered.append(folder_id)
-                return []
-
-            async def list_one(_net, folder_id: str, *, offset: int, limit: int):
-                # count-check: return same count as DB so pruning holds
-                return [], 1
-
-            q = create_write_queue()
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThread(pool)
-                drain = asyncio.create_task(self._drain_writes(q, off_main))
+                off_main = OffMainThreadService(pool)
+                storage = StorageService(db_path, off_main)
+                await storage.ensure_schema()
+                await storage.bulk_upsert_nodes(
+                    [
+                        _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                        _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
+                        _node(mount_id("b"), "b", SERVER_ROOT_ID, is_directory=True),
+                        _node("dirX_a", "X", mount_id("a"), is_directory=True),
+                        _node("child_a", "c.txt", "dirX_a"),
+                        _node("dirX_b", "X", mount_id("b"), is_directory=True),
+                        _node("child_b", "c.txt", "dirX_b"),
+                    ]
+                )
+
+                entered: list[str] = []
+
+                async def by_path(_net: object, path: str) -> list:
+                    if path == "/vol/a":
+                        return [
+                            _syno_item(
+                                "dirX_a", "X", is_dir=True, sync_id=50, max_id=80
+                            )
+                        ]
+                    return [
+                        _syno_item("dirX_b", "X", is_dir=True, sync_id=50, max_id=80)
+                    ]
+
+                async def list_all(_net: object, folder_id: str) -> list:
+                    entered.append(folder_id)
+                    return []
+
+                async def list_one(
+                    _net: object, folder_id: str, offset: int, limit: int
+                ) -> tuple:
+                    return [], 1
+
+                q = create_write_queue()
+                mq: asyncio.Queue = asyncio.Queue()
+                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                drain = asyncio.create_task(self._drain_writes(q))
+                meta_drain = asyncio.create_task(
+                    metadata_worker(mq, cs.process_metadata_item)
+                )
                 try:
-                    with (
-                        patch.object(
-                            changes_mod,
-                            "list_folder_all_by_path",
-                            new=AsyncMock(side_effect=by_path),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "list_folder_all",
-                            new=AsyncMock(side_effect=list_all),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "list_folder",
-                            new=AsyncMock(side_effect=list_one),
-                        ),
-                        patch.object(
-                            changes_mod,
-                            "enrich_media_before_upsert",
-                            new=_noop_enrich,
-                        ),
-                    ):
-                        await scan_all_mounts(
+                    with ExitStack() as stack:
+                        self._push_incremental_scan_mocks(
+                            stack,
+                            by_path=by_path,
+                            list_all=list_all,
+                            list_folder_fn=list_one,
+                        )
+                        svc = StartupScanService(
                             network=None,  # type: ignore[arg-type]
                             storage=storage,
-                            folders={"a": "/vol/a", "b": "/vol/b"},
-                            # mount a threshold=100 > max_id=80 → dirX_a skipped
-                            # mount b threshold=50 < max_id=80 → dirX_b entered
-                            last_max_ids={"a": 100, "b": 50},
-                            volume_map=None,
-                            off_main=off_main,
-                            write_queue=q,
+                            syno_paths=SynologyPathService(
+                                MountRegistry({"a": "/vol/a", "b": "/vol/b"}, {})
+                            ),
+                            node_sync=cs,
                         )
+                        await svc._scan_all_mounts({"a": 100, "b": 50})
                 finally:
+                    await mq.join()
                     await q.join()
+                    meta_drain.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await meta_drain
                     drain.cancel()
                     with suppress(asyncio.CancelledError):
                         await drain
 
-            self.assertNotIn("dirX_a", entered)
-            self.assertIn("dirX_b", entered)
+                self.assertNotIn("dirX_a", entered)
+                self.assertIn("dirX_b", entered)
         finally:
             os.unlink(db_path)

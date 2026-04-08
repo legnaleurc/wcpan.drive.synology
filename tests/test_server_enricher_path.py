@@ -4,7 +4,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import TestCase
 
-from wcpan.drive.synology.server._enricher import resolve_local_path
+from wcpan.drive.synology._server.services.paths import (
+    _resolve_local_path as resolve_local_path,
+)
 from wcpan.drive.synology.types import NodeRecord
 
 
@@ -40,10 +42,10 @@ class TestResolveLocalPath(TestCase):
         file_rec = _node("fid", "readme.txt", "folder_id")
         folder_rec = _node("folder_id", "Projects", "_docs", is_directory=True)
         cache = {"folder_id": folder_rec}
-        folders = {"docs": "/volume1/docs"}
-        volume_map = {"/volume1/docs": "/mnt/nas/docs"}
+        mounts = {"docs": "/volume1/docs"}
+        local_paths = {"/volume1/docs": "/mnt/nas/docs"}
         # when
-        path = resolve_local_path(file_rec, cache, folders, volume_map)
+        path = resolve_local_path(mounts, local_paths, file_rec, cache)
         # then
         self.assertEqual(path, Path("/mnt/nas/docs/Projects/readme.txt"))
 
@@ -51,10 +53,10 @@ class TestResolveLocalPath(TestCase):
         # given
         file_rec = _node("fid", "a.txt", "missing_parent")
         cache: dict[str, NodeRecord | None] = {}
-        folders = {"docs": "/volume1/docs"}
-        volume_map = {"/volume1/docs": "/mnt/x"}
+        mounts = {"docs": "/volume1/docs"}
+        local_paths = {"/volume1/docs": "/mnt/x"}
         # when
-        path = resolve_local_path(file_rec, cache, folders, volume_map)
+        path = resolve_local_path(mounts, local_paths, file_rec, cache)
         # then
         self.assertIsNone(path)
 
@@ -63,24 +65,24 @@ class TestResolveLocalPath(TestCase):
         file_rec = _node("fid", "a.txt", "folder_id")
         folder_rec = _node("folder_id", "x", "_docs", is_directory=True)
         cache = {"folder_id": folder_rec}
-        folders = {"docs": "/volume1/docs"}
-        volume_map = {"/other/prefix": "/mnt/other"}
+        mounts = {"docs": "/volume1/docs"}
+        local_paths = {"/other/prefix": "/mnt/other"}
         # when
-        path = resolve_local_path(file_rec, cache, folders, volume_map)
+        path = resolve_local_path(mounts, local_paths, file_rec, cache)
         # then
         self.assertIsNone(path)
 
-    def test_picks_longest_volume_map_prefix(self):
+    def test_picks_longest_local_paths_prefix(self):
         # given
         file_rec = _node("fid", "f.txt", "folder_id")
         folder_rec = _node("folder_id", "sub", "_share", is_directory=True)
         cache = {"folder_id": folder_rec}
-        folders = {"share": "/vol/share"}
-        volume_map = {
+        mounts = {"share": "/vol/share"}
+        local_paths = {
             "/vol": "/mnt/root",
             "/vol/share": "/mnt/share",
         }
         # when
-        path = resolve_local_path(file_rec, cache, folders, volume_map)
+        path = resolve_local_path(mounts, local_paths, file_rec, cache)
         # then
         self.assertEqual(path, Path("/mnt/share/sub/f.txt"))
