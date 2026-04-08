@@ -173,6 +173,12 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
             async def list_all(_net, folder_id: str) -> list:
                 raise AssertionError(f"unexpected list of {folder_id}")
 
+            # Count matches DB (1 child) → folder is safely skipped
+            async def list_folder_fn(
+                _net, folder_id: str, offset: int, limit: int
+            ) -> tuple:
+                return [], 1
+
             q = create_write_queue()
             with ThreadPoolExecutor(2) as pool:
                 off_main = OffMainThread(pool)
@@ -188,6 +194,11 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                             changes_mod,
                             "list_folder_all",
                             new=AsyncMock(side_effect=list_all),
+                        ),
+                        patch.object(
+                            changes_mod,
+                            "list_folder",
+                            new=AsyncMock(side_effect=list_folder_fn),
                         ),
                         patch.object(
                             changes_mod,
@@ -491,5 +502,88 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
 
             self.assertIsNotNone(storage.get_node_by_id("dirF"))
             self.assertIsNotNone(storage.get_node_by_id("childC"))
+        finally:
+            os.unlink(db_path)
+
+    async def test_max_id_prune_detects_deletion_via_count_mismatch(self) -> None:
+        """max_id unchanged but a child deleted: count check triggers a full scan."""
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            storage = Storage(db_path)
+            storage.ensure_schema()
+            storage.bulk_upsert_nodes(
+                [
+                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                    _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
+                    _node("dirF", "F", mount_id("a"), is_directory=True),
+                    _node("child1", "a.txt", "dirF"),
+                    _node("child2", "b.txt", "dirF"),  # deleted from Synology
+                ]
+            )
+
+            async def by_path(_net, path: str) -> list:
+                if path == "/vol/a":
+                    return [_syno_item("dirF", "F", is_dir=True, sync_id=10, max_id=10)]
+                return []
+
+            # API only has 1 child remaining
+            async def list_all(_net, folder_id: str) -> list:
+                if folder_id == "dirF":
+                    return [_syno_item("child1", "a.txt")]
+                return []
+
+            # Count-check: DB has 2 children, API total is 1
+            async def list_folder_fn(
+                _net, folder_id: str, offset: int, limit: int
+            ) -> tuple:
+                if folder_id == "dirF":
+                    return [], 1
+                return [], 0
+
+            q = create_write_queue()
+            with ThreadPoolExecutor(2) as pool:
+                off_main = OffMainThread(pool)
+                drain = asyncio.create_task(self._drain_writes(q, off_main))
+                try:
+                    with (
+                        patch.object(
+                            changes_mod,
+                            "list_folder_all_by_path",
+                            new=AsyncMock(side_effect=by_path),
+                        ),
+                        patch.object(
+                            changes_mod,
+                            "list_folder_all",
+                            new=AsyncMock(side_effect=list_all),
+                        ),
+                        patch.object(
+                            changes_mod,
+                            "list_folder",
+                            new=AsyncMock(side_effect=list_folder_fn),
+                        ),
+                        patch.object(
+                            changes_mod,
+                            "enrich_media_before_upsert",
+                            new=_noop_enrich,
+                        ),
+                    ):
+                        await scan_all_mounts(
+                            network=None,  # type: ignore[arg-type]
+                            storage=storage,
+                            folders={"a": "/vol/a"},
+                            last_max_id=100,
+                            volume_map=None,
+                            off_main=off_main,
+                            write_queue=q,
+                        )
+                finally:
+                    await q.join()
+                    drain.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await drain
+
+            self.assertIsNotNone(storage.get_node_by_id("child1"))
+            self.assertIsNone(storage.get_node_by_id("child2"))
         finally:
             os.unlink(db_path)

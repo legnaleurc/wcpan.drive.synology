@@ -83,7 +83,7 @@ async def reconcile_subtree(
     else:
         queue = [root_node_id]
 
-    checked = added = updated = list_errors = 0
+    checked = added = updated = removed = list_errors = 0
 
     while queue:
         parent_id = queue.pop(0)
@@ -144,10 +144,24 @@ async def reconcile_subtree(
             if item["type"] == "dir":
                 queue.append(fid)
 
+        api_ids = {item["file_id"] for item in items}
+        for fid, existing in db_by_id.items():
+            if fid not in api_ids:
+                removed += 1
+                _L.info(
+                    "Removing node %r (%r) absent from API under %r",
+                    fid,
+                    existing.name,
+                    parent_id,
+                )
+                if not dry_run:
+                    storage.delete_subtree_and_emit_changes(existing.node_id)
+
     return {
         "checked": checked,
         "added": added,
         "updated": updated,
+        "removed": removed,
         "list_errors": list_errors,
     }
 

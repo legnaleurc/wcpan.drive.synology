@@ -23,7 +23,12 @@ from .._network import Network
 from .._types import WriteQueue
 from .._virtual_ids import mount_id
 from .._workers import enqueue_write
-from .files import SynologyFileInfo, list_folder_all, list_folder_all_by_path
+from .files import (
+    SynologyFileInfo,
+    list_folder,
+    list_folder_all,
+    list_folder_all_by_path,
+)
 
 
 _L = getLogger(__name__)
@@ -156,19 +161,43 @@ async def _scan_subtree_bfs(
         if not force_scan and last_max_id > 0 and this_max_id <= last_max_id:
             db_children = await off_main(storage.get_children, folder_id)
             if db_children:
+                # max_id doesn't increase when files are deleted (it equals the
+                # max sync_id of *remaining* children).  Verify via a cheap
+                # count-only API call so pure-deletion cases aren't missed.
+                should_skip = True
+                try:
+                    _, api_count = await list_folder(
+                        network, folder_id, offset=0, limit=1
+                    )
+                    if api_count != len(db_children):
+                        _L.debug(
+                            "Folder %s count mismatch (db=%d api=%d),"
+                            " scanning for deletions",
+                            folder_id,
+                            len(db_children),
+                            api_count,
+                        )
+                        should_skip = False
+                except Exception:
+                    _L.warning(
+                        "Count-check failed for folder %s, preserving subtree",
+                        folder_id,
+                    )
+                if should_skip:
+                    _L.debug(
+                        "Skipping folder %s (max_id=%d <= last_max_id=%d)",
+                        folder_id,
+                        this_max_id,
+                        last_max_id,
+                    )
+                    acc.subtree_preserve_roots.add(folder_id)
+                    continue
+            else:
                 _L.debug(
-                    "Skipping folder %s (max_id=%d <= last_max_id=%d)",
+                    "Force-entering folder %s: in DB but no children (max_id=%d)",
                     folder_id,
                     this_max_id,
-                    last_max_id,
                 )
-                acc.subtree_preserve_roots.add(folder_id)
-                continue
-            _L.debug(
-                "Force-entering folder %s: in DB but no children (max_id=%d)",
-                folder_id,
-                this_max_id,
-            )
 
         _L.debug("Entering folder %s (max_id=%d)", folder_id, this_max_id)
         try:

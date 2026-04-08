@@ -319,3 +319,81 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
             self.assertIsNone(storage.get_node_by_id("f-new"))
         finally:
             os.unlink(db_path)
+
+    async def test_removes_node_absent_from_api(self) -> None:
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            storage = Storage(db_path)
+            storage.ensure_schema()
+            storage.bulk_upsert_nodes(
+                [
+                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                    _node(mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True),
+                    _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
+                    _node("f-1", "keep.txt", "dir-1"),
+                    _node("f-2", "deleted.txt", "dir-1"),
+                ]
+            )
+            folders = {"docs": "/volume1/docs"}
+            network = MagicMock()
+
+            async def _list_children(
+                _nw: object, parent_id: str, _fd: dict[str, str]
+            ) -> list[dict]:
+                if parent_id == "dir-1":
+                    return [_syno_item("f-1", "keep.txt")]
+                return []
+
+            with patch(
+                "wcpan.drive.synology.server._reconcile.list_children_for_parent",
+                side_effect=_list_children,
+            ):
+                stats = await reconcile_subtree(
+                    storage, network, folders, "dir-1", dry_run=False
+                )
+
+            self.assertEqual(stats["checked"], 1)
+            self.assertEqual(stats["removed"], 1)
+            self.assertIsNotNone(storage.get_node_by_id("f-1"))
+            self.assertIsNone(storage.get_node_by_id("f-2"))
+        finally:
+            os.unlink(db_path)
+
+    async def test_removes_node_absent_from_api_dry_run(self) -> None:
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            storage = Storage(db_path)
+            storage.ensure_schema()
+            storage.bulk_upsert_nodes(
+                [
+                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                    _node(mount_id("docs"), "docs", SERVER_ROOT_ID, is_directory=True),
+                    _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
+                    _node("f-1", "keep.txt", "dir-1"),
+                    _node("f-2", "deleted.txt", "dir-1"),
+                ]
+            )
+            folders = {"docs": "/volume1/docs"}
+            network = MagicMock()
+
+            async def _list_children(
+                _nw: object, parent_id: str, _fd: dict[str, str]
+            ) -> list[dict]:
+                if parent_id == "dir-1":
+                    return [_syno_item("f-1", "keep.txt")]
+                return []
+
+            with patch(
+                "wcpan.drive.synology.server._reconcile.list_children_for_parent",
+                side_effect=_list_children,
+            ):
+                stats = await reconcile_subtree(
+                    storage, network, folders, "dir-1", dry_run=True
+                )
+
+            self.assertEqual(stats["removed"], 1)
+            self.assertIsNotNone(storage.get_node_by_id("f-2"))
+        finally:
+            os.unlink(db_path)
