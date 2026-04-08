@@ -19,6 +19,7 @@ format: venv
 lint: venv
 	$(RUFF) format --check tests src/wcpan
 	$(RUFF) check tests src/wcpan
+	$(PYRIGHT)
 
 clean:
 	$(RM) ./dist ./build ./*.egg-info
@@ -28,7 +29,6 @@ purge: clean
 
 test: venv
 	$(PYTHON) -m compileall src/wcpan
-	$(PYRIGHT)
 	$(PYTHON) -m unittest
 
 coverage: venv
