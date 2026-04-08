@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS server_state (
 """
 
 _LAST_MAX_ID_KEY = "last_max_id"
+_MOUNT_MAX_ID_PREFIX = "last_max_id:"
+_MOUNT_PATH_PREFIX = "mount_path:"
 _MAX_CHANGES_PER_PAGE = 1000
 
 _UPSERT_NODE_SQL = """
@@ -149,6 +151,63 @@ def _set_last_max_id(dsn: str, value: int) -> None:
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (_LAST_MAX_ID_KEY, str(value)),
         )
+
+
+def _get_mount_max_ids(dsn: str, folders: dict[str, str]) -> dict[str, int]:
+    """Return per-mount last_max_id values, handling migration and path changes.
+
+    Migration: if no per-mount keys exist yet, fall back to the old global
+    ``last_max_id`` key so an upgrade doesn't trigger a full re-scan.
+
+    Path change: if the stored syno_path for a mount differs from the current
+    config, reset that mount to 0 to force a full re-scan.
+    """
+    names = list(folders.keys())
+    per_mount_keys = [f"{_MOUNT_MAX_ID_PREFIX}{n}" for n in names]
+    path_keys = [f"{_MOUNT_PATH_PREFIX}{n}" for n in names]
+    all_keys = per_mount_keys + path_keys + [_LAST_MAX_ID_KEY]
+
+    with _read_only(dsn) as con:
+        placeholders = ",".join("?" * len(all_keys))
+        with closing(
+            con.execute(
+                f"SELECT key, value FROM server_state WHERE key IN ({placeholders})",
+                all_keys,
+            )
+        ) as cur:
+            kv = {row["key"]: row["value"] for row in cur}
+
+    global_fallback = int(kv[_LAST_MAX_ID_KEY]) if _LAST_MAX_ID_KEY in kv else 0
+    has_any_per_mount = any(k in kv for k in per_mount_keys)
+
+    result: dict[str, int] = {}
+    for name, syno_path in folders.items():
+        per_mount_key = f"{_MOUNT_MAX_ID_PREFIX}{name}"
+        path_key = f"{_MOUNT_PATH_PREFIX}{name}"
+
+        if has_any_per_mount:
+            value = int(kv[per_mount_key]) if per_mount_key in kv else 0
+        else:
+            value = global_fallback
+
+        stored_path = kv.get(path_key)
+        if stored_path is not None and stored_path != syno_path:
+            value = 0
+
+        result[name] = value
+
+    return result
+
+
+def _set_mount_state(dsn: str, name: str, path: str, value: int) -> None:
+    """Save per-mount last_max_id and syno_path atomically."""
+    with _read_write(dsn) as con:
+        upsert = (
+            "INSERT INTO server_state (key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        )
+        con.execute(upsert, (f"{_MOUNT_MAX_ID_PREFIX}{name}", str(value)))
+        con.execute(upsert, (f"{_MOUNT_PATH_PREFIX}{name}", path))
 
 
 def _upsert_node(dsn: str, record: NodeRecord) -> None:
@@ -472,6 +531,12 @@ class Storage:
 
     def set_last_max_id(self, value: int) -> None:
         _set_last_max_id(self._dsn, value)
+
+    def get_mount_max_ids(self, folders: dict[str, str]) -> dict[str, int]:
+        return _get_mount_max_ids(self._dsn, folders)
+
+    def set_mount_state(self, name: str, path: str, value: int) -> None:
+        _set_mount_state(self._dsn, name, path, value)
 
     def upsert_node(self, record: NodeRecord) -> None:
         _upsert_node(self._dsn, record)

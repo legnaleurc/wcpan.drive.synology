@@ -128,7 +128,7 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                             network=None,  # type: ignore[arg-type]
                             storage=storage,
                             folders={"a": "/vol/a", "b": "/vol/b"},
-                            last_max_id=50,
+                            last_max_ids={"a": 50, "b": 50},
                             volume_map=None,
                             off_main=off_main,
                             write_queue=q,
@@ -210,7 +210,7 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                             network=None,  # type: ignore[arg-type]
                             storage=storage,
                             folders={"a": "/vol/a"},
-                            last_max_id=100,
+                            last_max_ids={"a": 100},
                             volume_map=None,
                             off_main=off_main,
                             write_queue=q,
@@ -276,7 +276,7 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                             network=None,  # type: ignore[arg-type]
                             storage=storage,
                             folders={"a": "/vol/a"},
-                            last_max_id=0,
+                            last_max_ids={"a": 0},
                             volume_map=None,
                             off_main=off_main,
                             write_queue=q,
@@ -348,7 +348,7 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                             network=None,  # type: ignore[arg-type]
                             storage=storage,
                             folders={"a": "/vol/a"},
-                            last_max_id=100,
+                            last_max_ids={"a": 100},
                             volume_map=None,
                             off_main=off_main,
                             write_queue=q,
@@ -418,7 +418,7 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                             network=None,  # type: ignore[arg-type]
                             storage=storage,
                             folders={"a": "/vol/a"},
-                            last_max_id=100,
+                            last_max_ids={"a": 100},
                             volume_map=None,
                             off_main=off_main,
                             write_queue=q,
@@ -489,7 +489,7 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                             network=None,  # type: ignore[arg-type]
                             storage=storage,
                             folders={"a": "/vol/a"},
-                            last_max_id=50,
+                            last_max_ids={"a": 50},
                             volume_map=None,
                             off_main=off_main,
                             write_queue=q,
@@ -572,7 +572,7 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                             network=None,  # type: ignore[arg-type]
                             storage=storage,
                             folders={"a": "/vol/a"},
-                            last_max_id=100,
+                            last_max_ids={"a": 100},
                             volume_map=None,
                             off_main=off_main,
                             write_queue=q,
@@ -585,5 +585,152 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
 
             self.assertIsNotNone(storage.get_node_by_id("child1"))
             self.assertIsNone(storage.get_node_by_id("child2"))
+        finally:
+            os.unlink(db_path)
+
+    async def test_failed_mount_does_not_advance_its_max_id(self) -> None:
+        """A mount whose top-level list fails returns its input last_max_id unchanged."""
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            storage = Storage(db_path)
+            storage.ensure_schema()
+            storage.bulk_upsert_nodes(
+                [
+                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                    _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
+                    _node(mount_id("b"), "b", SERVER_ROOT_ID, is_directory=True),
+                ]
+            )
+
+            async def by_path(_net, path: str) -> list:
+                if path == "/vol/a":
+                    raise OSError("mount a unavailable")
+                # mount b has a new item with sync_id=200
+                return [_syno_item("f1", "file.txt", sync_id=200)]
+
+            q = create_write_queue()
+            with ThreadPoolExecutor(2) as pool:
+                off_main = OffMainThread(pool)
+                drain = asyncio.create_task(self._drain_writes(q, off_main))
+                try:
+                    with (
+                        patch.object(
+                            changes_mod,
+                            "list_folder_all_by_path",
+                            new=AsyncMock(side_effect=by_path),
+                        ),
+                        patch.object(
+                            changes_mod,
+                            "enrich_media_before_upsert",
+                            new=_noop_enrich,
+                        ),
+                        patch.object(changes_mod._L, "exception", MagicMock()),
+                    ):
+                        result = await scan_all_mounts(
+                            network=None,  # type: ignore[arg-type]
+                            storage=storage,
+                            folders={"a": "/vol/a", "b": "/vol/b"},
+                            last_max_ids={"a": 100, "b": 100},
+                            volume_map=None,
+                            off_main=off_main,
+                            write_queue=q,
+                        )
+                finally:
+                    await q.join()
+                    drain.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await drain
+
+            # mount a failed: its value must stay at the input (100), not advance
+            self.assertEqual(result["a"], 100)
+            # mount b succeeded: its value advances to 200
+            self.assertEqual(result["b"], 200)
+        finally:
+            os.unlink(db_path)
+
+    async def test_per_mount_pruning_thresholds_are_independent(self) -> None:
+        """Each mount uses its own last_max_id threshold for BFS pruning."""
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            storage = Storage(db_path)
+            storage.ensure_schema()
+            # Both mounts have a subfolder "dirX" with max_id=80 already in DB.
+            storage.bulk_upsert_nodes(
+                [
+                    _node(SERVER_ROOT_ID, "", None, is_directory=True),
+                    _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
+                    _node(mount_id("b"), "b", SERVER_ROOT_ID, is_directory=True),
+                    _node("dirX_a", "X", mount_id("a"), is_directory=True),
+                    _node("child_a", "c.txt", "dirX_a"),
+                    _node("dirX_b", "X", mount_id("b"), is_directory=True),
+                    _node("child_b", "c.txt", "dirX_b"),
+                ]
+            )
+
+            entered: list[str] = []
+
+            async def by_path(_net, path: str) -> list:
+                if path == "/vol/a":
+                    return [
+                        _syno_item("dirX_a", "X", is_dir=True, sync_id=50, max_id=80)
+                    ]
+                return [_syno_item("dirX_b", "X", is_dir=True, sync_id=50, max_id=80)]
+
+            async def list_all(_net, folder_id: str) -> list:
+                entered.append(folder_id)
+                return []
+
+            async def list_one(_net, folder_id: str, *, offset: int, limit: int):
+                # count-check: return same count as DB so pruning holds
+                return [], 1
+
+            q = create_write_queue()
+            with ThreadPoolExecutor(2) as pool:
+                off_main = OffMainThread(pool)
+                drain = asyncio.create_task(self._drain_writes(q, off_main))
+                try:
+                    with (
+                        patch.object(
+                            changes_mod,
+                            "list_folder_all_by_path",
+                            new=AsyncMock(side_effect=by_path),
+                        ),
+                        patch.object(
+                            changes_mod,
+                            "list_folder_all",
+                            new=AsyncMock(side_effect=list_all),
+                        ),
+                        patch.object(
+                            changes_mod,
+                            "list_folder",
+                            new=AsyncMock(side_effect=list_one),
+                        ),
+                        patch.object(
+                            changes_mod,
+                            "enrich_media_before_upsert",
+                            new=_noop_enrich,
+                        ),
+                    ):
+                        await scan_all_mounts(
+                            network=None,  # type: ignore[arg-type]
+                            storage=storage,
+                            folders={"a": "/vol/a", "b": "/vol/b"},
+                            # mount a threshold=100 > max_id=80 → dirX_a skipped
+                            # mount b threshold=50 < max_id=80 → dirX_b entered
+                            last_max_ids={"a": 100, "b": 50},
+                            volume_map=None,
+                            off_main=off_main,
+                            write_queue=q,
+                        )
+                finally:
+                    await q.join()
+                    drain.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await drain
+
+            self.assertNotIn("dirX_a", entered)
+            self.assertIn("dirX_b", entered)
         finally:
             os.unlink(db_path)

@@ -72,49 +72,40 @@ async def _scanner_initial_sync(
 ) -> None:
     """First full scan or resume: align nodes + change feed before serving."""
     wq = write_queue
-    last_max_id = await off_main(storage.get_last_max_id)
+    last_max_ids = await off_main(storage.get_mount_max_ids, folders)
+    is_first_run = not any(last_max_ids.values())
 
-    if last_max_id == 0:
+    if is_first_run:
         _L.info("First run: performing full scan of %d mount(s)", len(folders))
         _L.debug("Creating root node and %d mount node(s)", len(folders))
         structural = _structural_records(folders)
         await enqueue_write(
             wq, partial(storage.apply_scan_folder_batch, [], structural)
         )
+    else:
+        _L.info("Resuming with per-mount max_ids: %s", last_max_ids)
+        # First run already emitted structural rows into `changes`; keep `nodes`
+        # in sync (e.g. new mounts in config) without duplicate feed rows.
+        structural = _structural_records(folders)
+        _L.debug("Ensuring %d mount node(s) exist", len(folders))
+        await enqueue_write(wq, partial(storage.bulk_upsert_nodes, structural))
 
-        new_max_id = await scan_all_mounts(
-            network,
-            storage,
-            folders,
-            last_max_id=0,
-            volume_map=volume_map,
-            off_main=off_main,
-            write_queue=wq,
-        )
-        await enqueue_write(wq, partial(storage.set_last_max_id, new_max_id))
-        _L.info("Full scan complete; last_max_id=%d", new_max_id)
-        return
-
-    _L.info("Resuming from last_max_id=%d", last_max_id)
-    # First run already emitted structural rows into `changes`; keep `nodes` in
-    # sync (e.g. new mounts in config) without inserting duplicate feed rows.
-    structural = _structural_records(folders)
-    _L.debug("Ensuring %d mount node(s) exist", len(folders))
-    await enqueue_write(wq, partial(storage.bulk_upsert_nodes, structural))
-
-    _L.info("Resuming: running incremental scan to catch up on downtime changes")
-    new_max_id = await scan_all_mounts(
+    new_max_ids = await scan_all_mounts(
         network,
         storage,
         folders,
-        last_max_id=last_max_id,
+        last_max_ids=last_max_ids,
         volume_map=volume_map,
         off_main=off_main,
         write_queue=wq,
     )
-    if new_max_id > last_max_id:
-        await enqueue_write(wq, partial(storage.set_last_max_id, new_max_id))
-    _L.info("Resume scan complete; last_max_id=%d", new_max_id)
+    for name, new_max_id in new_max_ids.items():
+        if new_max_id > last_max_ids.get(name, 0):
+            await enqueue_write(
+                wq,
+                partial(storage.set_mount_state, name, folders[name], new_max_id),
+            )
+    _L.info("Scan complete; per-mount max_ids: %s", new_max_ids)
 
 
 async def _scanner_incremental_loop(
@@ -137,19 +128,25 @@ async def _scanner_incremental_loop(
             except asyncio.TimeoutError:
                 break
         try:
-            last_max_id = await off_main(storage.get_last_max_id)
-            new_max_id = await scan_all_mounts(
+            last_max_ids = await off_main(storage.get_mount_max_ids, folders)
+            new_max_ids = await scan_all_mounts(
                 network,
                 storage,
                 folders,
-                last_max_id,
+                last_max_ids=last_max_ids,
                 volume_map=volume_map,
                 off_main=off_main,
                 write_queue=wq,
             )
-            if new_max_id > last_max_id:
-                await enqueue_write(wq, partial(storage.set_last_max_id, new_max_id))
-                _L.debug("Updated last_max_id to %d", new_max_id)
+            for name, new_max_id in new_max_ids.items():
+                if new_max_id > last_max_ids.get(name, 0):
+                    await enqueue_write(
+                        wq,
+                        partial(
+                            storage.set_mount_state, name, folders[name], new_max_id
+                        ),
+                    )
+                    _L.debug("Updated max_id for %r to %d", name, new_max_id)
         except Exception:
             _L.exception("Error during incremental scan")
 

@@ -245,49 +245,52 @@ async def scan_all_mounts(
     network: Network,
     storage: Storage,
     folders: dict[str, str],
-    last_max_id: int,
+    last_max_ids: dict[str, int],
     *,
     volume_map: dict[str, str] | None = None,
     off_main: OffMainThread,
     write_queue: WriteQueue,
-) -> int:
-    """Scan all mounts. Pass last_max_id=0 for a full initial scan.
+) -> dict[str, int]:
+    """Scan all mounts. Pass last_max_ids with 0 values for a full initial scan.
 
-    Returns the highest sync_id seen across all mounts.
+    Returns per-mount highest sync_id seen. Failed mounts retain their input
+    value so their last_max_id is never advanced on failure.
     """
-    highest = last_max_id
+    per_mount_highest: dict[str, int] = {
+        name: last_max_ids.get(name, 0) for name in folders
+    }
     acc = ScanAccumulator()
 
     for name, syno_path in folders.items():
         _L.debug("Scanning mount %r (%s)", name, syno_path)
         mid = mount_id(name)
+        mount_last = last_max_ids.get(name, 0)
         try:
             level_highest, subfolders = await _scan_mount_level(
                 network,
                 storage,
                 mid,
                 syno_path,
-                last_max_id,
+                mount_last,
                 acc,
                 folders=folders,
                 volume_map=volume_map,
                 off_main=off_main,
                 write_queue=write_queue,
             )
-            highest = max(highest, level_highest)
 
             subtree_highest = await _scan_subtree_bfs(
                 network,
                 storage,
                 subfolders,
-                last_max_id,
+                mount_last,
                 acc,
                 folders=folders,
                 volume_map=volume_map,
                 off_main=off_main,
                 write_queue=write_queue,
             )
-            highest = max(highest, subtree_highest)
+            per_mount_highest[name] = max(mount_last, level_highest, subtree_highest)
         except Exception:
             _L.exception("Error scanning mount %r (%s)", name, syno_path)
             acc.subtree_preserve_roots.add(mid)
@@ -303,4 +306,4 @@ async def scan_all_mounts(
         partial(storage.apply_deferred_scan_removals, preserved, mount_ids),
     )
 
-    return highest
+    return per_mount_highest
