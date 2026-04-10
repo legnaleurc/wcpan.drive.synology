@@ -1,6 +1,6 @@
 [project]
 name = "wcpan-drive-synology"
-version = "2.1.0"
+version = "3.0.0"
 description = "Synology Drive Web API integration for wcpan.drive"
 authors = [
     { name = "Wei-Cheng Pan", email = "legnaleurc@gmail.com" }
