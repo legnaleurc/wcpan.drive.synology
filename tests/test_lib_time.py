@@ -42,7 +42,8 @@ class TestNodeRecordFromDictNaiveDatetime(TestCase):
     def test_naive_ctime_mtime_get_utc(self):
         # given
         data = {
-            "node_id": "n1",
+            "id": "n1",
+            "mutable_id": "n1",
             "parent_id": None,
             "name": "f.txt",
             "is_directory": False,

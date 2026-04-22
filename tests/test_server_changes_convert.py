@@ -2,13 +2,14 @@
 
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from wcpan.drive.synology._lib import FOLDER_MIME_TYPE
-from wcpan.drive.synology._server.lib.nodes import convert_file_info as _convert
+from wcpan.drive.synology._server.api.lib import convert_file_info as _convert
 from wcpan.drive.synology._server.services.enricher import MediaEnrichService
 from wcpan.drive.synology._server.services.off_main import OffMainThreadService
 from wcpan.drive.synology._server.services.paths import LocalPathService
@@ -25,6 +26,7 @@ class TestConvertSynologyFileInfo(TestCase):
         # given
         info = {
             "file_id": "d1",
+            "permanent_link": "d1",
             "parent_id": "p",
             "name": "folder",
             "type": "dir",
@@ -40,7 +42,7 @@ class TestConvertSynologyFileInfo(TestCase):
         # then
         self.assertTrue(record.is_directory)
         self.assertEqual(record.mime_type, FOLDER_MIME_TYPE)
-        self.assertEqual(record.node_id, "d1")
+        self.assertEqual(record.id, "d1")
         self.assertEqual(record.parent_id, parent_id)
         self.assertEqual(record.ctime, datetime.fromtimestamp(1700000000, UTC))
         self.assertEqual(record.mtime, datetime.fromtimestamp(1700003600, UTC))
@@ -49,6 +51,7 @@ class TestConvertSynologyFileInfo(TestCase):
         # given
         info = {
             "file_id": "f1",
+            "permanent_link": "f1",
             "parent_id": "p",
             "name": "pic.png",
             "type": "file",
@@ -72,6 +75,7 @@ class TestConvertSynologyFileInfo(TestCase):
         # given
         info = {
             "file_id": "v1",
+            "permanent_link": "v1",
             "parent_id": "p",
             "name": "clip.mp4",
             "type": "file",
@@ -87,9 +91,10 @@ class TestConvertSynologyFileInfo(TestCase):
         self.assertTrue(record.is_video)
         self.assertIsNone(record.parent_id)
 
-    def test_file_with_image_metadata_flat_dimensions(self):
+    def test_file_with_image_metadata_does_not_fill_dimensions(self):
         info = {
             "file_id": "f2",
+            "permanent_link": "f2",
             "parent_id": "p",
             "name": "wide.png",
             "type": "file",
@@ -101,13 +106,14 @@ class TestConvertSynologyFileInfo(TestCase):
             "image_metadata": {"width": 1920, "height": 1080},
         }
         record = _convert(info, parent_id="par")
-        self.assertEqual(record.width, 1920)
-        self.assertEqual(record.height, 1080)
+        self.assertEqual(record.width, 0)
+        self.assertEqual(record.height, 0)
         self.assertEqual(record.ms_duration, 0)
 
-    def test_file_with_image_metadata_nested_resolution(self):
+    def test_file_with_nested_image_metadata_does_not_fill_dimensions(self):
         info = {
             "file_id": "f3",
+            "permanent_link": "f3",
             "parent_id": "p",
             "name": "nested.jpg",
             "type": "file",
@@ -119,12 +125,13 @@ class TestConvertSynologyFileInfo(TestCase):
             "image_metadata": {"resolution": {"width": 640, "height": 480}},
         }
         record = _convert(info, parent_id="par")
-        self.assertEqual(record.width, 640)
-        self.assertEqual(record.height, 480)
+        self.assertEqual(record.width, 0)
+        self.assertEqual(record.height, 0)
 
-    def test_video_with_image_metadata_duration(self):
+    def test_video_with_image_metadata_does_not_fill_duration(self):
         info = {
             "file_id": "v2",
+            "permanent_link": "v2",
             "parent_id": "p",
             "name": "clip.mp4",
             "type": "file",
@@ -140,28 +147,35 @@ class TestConvertSynologyFileInfo(TestCase):
             },
         }
         record = _convert(info, parent_id="root")
-        self.assertEqual(record.width, 1280)
-        self.assertEqual(record.height, 720)
-        self.assertEqual(record.ms_duration, 5000)
+        self.assertEqual(record.width, 0)
+        self.assertEqual(record.height, 0)
+        self.assertEqual(record.ms_duration, 0)
 
 
 class TestEnrichPreservesApiDimensions(IsolatedAsyncioTestCase):
     async def test_enrich_without_force_refresh_does_not_probe_when_api_filled(self):
-        info = {
-            "file_id": "f4",
-            "parent_id": "p",
-            "name": "api.png",
-            "type": "file",
-            "content_type": "image",
-            "size": 10,
-            "created_time": 0,
-            "modified_time": 0,
-            "sync_id": 1,
-            "image_metadata": {"width": 800, "height": 600},
-        }
-        record = _convert(info, parent_id="par")
-        local_path_svc = LocalPathService(MagicMock(), {}, {"docs": "/tmp"})
-        enricher = MediaEnrichService(local_path_svc)
+        record = _convert(
+            {
+                "file_id": "f4",
+                "permanent_link": "f4",
+                "parent_id": "p",
+                "name": "api.png",
+                "type": "file",
+                "content_type": "image",
+                "size": 10,
+                "created_time": 0,
+                "modified_time": 0,
+                "sync_id": 1,
+            },
+            parent_id="par",
+        )
+        record = replace(record, width=800, height=600)
+        local_path_svc = LocalPathService(
+            storage=MagicMock(),
+            mounts={},
+            local_paths={"docs": "/tmp"},
+        )
+        enricher = MediaEnrichService(local_path_service=local_path_svc)
         with patch(
             "wcpan.drive.synology._server.services.enricher._probe_sync",
             side_effect=AssertionError(
@@ -173,26 +187,36 @@ class TestEnrichPreservesApiDimensions(IsolatedAsyncioTestCase):
         self.assertEqual(out.height, 600)
 
     async def test_enrich_force_refresh_invokes_probe_when_api_filled(self) -> None:
-        info = {
-            "file_id": "f5",
-            "parent_id": "p",
-            "name": "api2.png",
-            "type": "file",
-            "content_type": "image",
-            "size": 10,
-            "created_time": 0,
-            "modified_time": 0,
-            "sync_id": 1,
-            "image_metadata": {"width": 800, "height": 600},
-        }
-        record = _convert(info, parent_id="par")
+        record = _convert(
+            {
+                "file_id": "f5",
+                "permanent_link": "f5",
+                "parent_id": "p",
+                "name": "api2.png",
+                "type": "file",
+                "content_type": "image",
+                "size": 10,
+                "created_time": 0,
+                "modified_time": 0,
+                "sync_id": 1,
+            },
+            parent_id="par",
+        )
+        record = replace(record, width=800, height=600)
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             probe_path = Path(tmp.name)
         try:
             with ThreadPoolExecutor(1) as pool:
-                off_main = OffMainThreadService(pool)
-                local_path_svc = LocalPathService(MagicMock(), {}, {"docs": "/tmp"})
-                enricher = MediaEnrichService(local_path_svc, off_main)
+                off_main = OffMainThreadService(pool=pool)
+                local_path_svc = LocalPathService(
+                    storage=MagicMock(),
+                    mounts={},
+                    local_paths={"docs": "/tmp"},
+                )
+                enricher = MediaEnrichService(
+                    local_path_service=local_path_svc,
+                    off_main=off_main,
+                )
                 with (
                     patch.object(
                         local_path_svc,
@@ -217,18 +241,19 @@ class TestNodeSyncServiceMetadataQueue(IsolatedAsyncioTestCase):
         wq = create_write_queue()
         mq = create_metadata_queue()
         with ThreadPoolExecutor(1) as pool:
-            off_main = OffMainThreadService(pool)
+            off_main = OffMainThreadService(pool=pool)
             storage = MagicMock()
             cs = NodeSyncService(
-                storage,
-                wq,
-                off_main,
-                {},
-                {"docs": "/tmp"},
+                storage=storage,
+                write_queue=wq,
+                off_main=off_main,
+                mounts={},
+                local_paths={"docs": "/tmp"},
                 metadata_queue=mq,
             )
             info = {
                 "file_id": "n1",
+                "permanent_link": "n1",
                 "parent_id": "p",
                 "name": "a.png",
                 "type": "file",

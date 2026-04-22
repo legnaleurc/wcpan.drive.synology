@@ -14,7 +14,12 @@ from wcpan.drive.synology._server.lib.mounts import (
     mount_name,
 )
 from wcpan.drive.synology._server.services.paths import SynologyPathService
-from wcpan.drive.synology._server.types import SynologyPath
+from wcpan.drive.synology._server.types import (
+    SynologyChildRef,
+    SynologyFileId,
+    SynologyPath,
+)
+from wcpan.drive.synology.types import MirrorMutableId
 
 
 class TestIsVirtual(TestCase):
@@ -97,37 +102,53 @@ class TestMountName(TestCase):
         self.assertIsNone(result)
 
 
-class TestSynologyParentRef(TestCase):
-    def test_mount_maps_to_folder_path(self):
+class TestSynologyParentRef(IsolatedAsyncioTestCase):
+    async def test_mount_maps_to_folder_path(self):
         # given
-        svc = SynologyPathService(MountRegistry({"photos": "/volume1/photos"}, {}))
+        svc = SynologyPathService(
+            registry=MountRegistry(
+                mounts={"photos": "/volume1/photos"},
+                root_ids={},
+            ),
+            storage=MagicMock(),
+        )
         # when
-        result = svc.synology_parent_ref("_photos")
+        result = await svc.synology_parent_ref("_photos")
         # then
         self.assertEqual(result, "/volume1/photos")
 
-    def test_root_uses_id_prefix(self):
+    async def test_root_requires_stored_node(self):
         # given
-        svc = SynologyPathService(MountRegistry({}, {}))
-        # when
-        result = svc.synology_parent_ref("_")
-        # then
-        self.assertEqual(result, "id:_")
+        storage = MagicMock()
+        storage.get_node_by_id = AsyncMock(return_value=None)
+        svc = SynologyPathService(
+            registry=MountRegistry(mounts={}, root_ids={}),
+            storage=storage,
+        )
+        # when / then
+        with self.assertRaises(ValueError):
+            await svc.synology_parent_ref("_")
 
-    def test_real_parent_uses_id_prefix(self):
+    async def test_real_parent_requires_stored_node(self):
         # given
-        svc = SynologyPathService(MountRegistry({}, {}))
-        # when
-        result = svc.synology_parent_ref("syno-file-7")
-        # then
-        self.assertEqual(result, "id:syno-file-7")
+        storage = MagicMock()
+        storage.get_node_by_id = AsyncMock(return_value=None)
+        svc = SynologyPathService(
+            registry=MountRegistry(mounts={}, root_ids={}),
+            storage=storage,
+        )
+        # when / then
+        with self.assertRaises(ValueError):
+            await svc.synology_parent_ref("syno-file-7")
 
 
 class TestCreateMountRegistry(IsolatedAsyncioTestCase):
     async def test_empty_mounts(self):
-        registry = await create_mount_registry(MagicMock(), {})
+        registry = await create_mount_registry({}, drive_api=MagicMock())
         self.assertEqual(registry.mounts, {})
-        self.assertIsNone(registry.lookup_mount_virtual_id("unknown"))
+        self.assertIsNone(
+            registry.lookup_mount_virtual_id(SynologyFileId(file_id="unknown"))
+        )
 
     async def test_resolves_root_ids_for_non_nested_mounts(self):
         mounts = {
@@ -143,10 +164,16 @@ class TestCreateMountRegistry(IsolatedAsyncioTestCase):
                 {"file_id": "id-2"},
             ],
         ) as mock_get:
-            registry = await create_mount_registry(network, mounts)
+            registry = await create_mount_registry(mounts, drive_api=network)
         self.assertEqual(registry.mounts, mounts)
-        self.assertEqual(registry.lookup_mount_virtual_id("id-1"), "_photos")
-        self.assertEqual(registry.lookup_mount_virtual_id("id-2"), "_videos")
+        self.assertEqual(
+            registry.lookup_mount_virtual_id(SynologyFileId(file_id="id-1")),
+            "_photos",
+        )
+        self.assertEqual(
+            registry.lookup_mount_virtual_id(SynologyFileId(file_id="id-2")),
+            "_videos",
+        )
         self.assertEqual(mock_get.await_count, 2)
 
     async def test_nested_mounts_raise_before_metadata_lookup(self):
@@ -159,7 +186,7 @@ class TestCreateMountRegistry(IsolatedAsyncioTestCase):
             new_callable=AsyncMock,
         ) as mock_get:
             with self.assertRaises(ValueError):
-                await create_mount_registry(MagicMock(), mounts)
+                await create_mount_registry(mounts, drive_api=MagicMock())
         mock_get.assert_not_awaited()
 
     async def test_nested_mounts_raise_in_reversed_order(self):
@@ -168,7 +195,7 @@ class TestCreateMountRegistry(IsolatedAsyncioTestCase):
             "photos": SynologyPath(PurePosixPath("/volume1/photos")),
         }
         with self.assertRaises(ValueError):
-            await create_mount_registry(MagicMock(), mounts)
+            await create_mount_registry(mounts, drive_api=MagicMock())
 
     async def test_prefix_but_not_subdirectory_is_ok(self):
         mounts = {
@@ -183,9 +210,15 @@ class TestCreateMountRegistry(IsolatedAsyncioTestCase):
                 {"file_id": "id-2"},
             ],
         ):
-            registry = await create_mount_registry(MagicMock(), mounts)
-        self.assertEqual(registry.lookup_mount_virtual_id("id-1"), "_photos")
-        self.assertEqual(registry.lookup_mount_virtual_id("id-2"), "_photos_archive")
+            registry = await create_mount_registry(mounts, drive_api=MagicMock())
+        self.assertEqual(
+            registry.lookup_mount_virtual_id(SynologyFileId(file_id="id-1")),
+            "_photos",
+        )
+        self.assertEqual(
+            registry.lookup_mount_virtual_id(SynologyFileId(file_id="id-2")),
+            "_photos_archive",
+        )
 
     async def test_trailing_slash_is_normalized_for_nested_check(self):
         mounts = {
@@ -193,4 +226,62 @@ class TestCreateMountRegistry(IsolatedAsyncioTestCase):
             "b": SynologyPath(PurePosixPath("/volume1/photos/2024")),
         }
         with self.assertRaises(ValueError):
-            await create_mount_registry(MagicMock(), mounts)
+            await create_mount_registry(mounts, drive_api=MagicMock())
+
+
+class TestFindChildByName(IsolatedAsyncioTestCase):
+    async def test_mount_parent_calls_get_node_metadata_with_child_ref(self):
+        # given
+        mount_path = SynologyPath(PurePosixPath("/volume1/photos"))
+        svc = SynologyPathService(
+            registry=MountRegistry(mounts={"photos": mount_path}, root_ids={}),
+            storage=MagicMock(),
+        )
+        drive_api = MagicMock()
+        expected = {"name": "2024"}
+        drive_api.get_node_metadata = AsyncMock(return_value=expected)
+        # when
+        result = await svc.find_child_by_name(drive_api, "_photos", "2024")
+        # then
+        drive_api.get_node_metadata.assert_awaited_once_with(
+            SynologyChildRef(parent_ref=mount_path, name="2024")
+        )
+        self.assertEqual(result, expected)
+
+    async def test_non_mount_parent_calls_get_node_metadata_with_child_ref(self):
+        # given
+        storage = MagicMock()
+        node_record = MagicMock()
+        node_record.mutable_id = MirrorMutableId("42")
+        storage.get_node_by_id = AsyncMock(return_value=node_record)
+        svc = SynologyPathService(
+            registry=MountRegistry(mounts={}, root_ids={}),
+            storage=storage,
+        )
+        drive_api = MagicMock()
+        expected = {"name": "img.jpg"}
+        drive_api.get_node_metadata = AsyncMock(return_value=expected)
+        # when
+        result = await svc.find_child_by_name(drive_api, "42", "img.jpg")
+        # then
+        drive_api.get_node_metadata.assert_awaited_once_with(
+            SynologyChildRef(
+                parent_ref=SynologyFileId(file_id="42"),
+                name="img.jpg",
+            )
+        )
+        self.assertEqual(result, expected)
+
+    async def test_parent_not_found_raises(self):
+        # given
+        storage = MagicMock()
+        storage.get_node_by_id = AsyncMock(return_value=None)
+        svc = SynologyPathService(
+            registry=MountRegistry(mounts={}, root_ids={}),
+            storage=storage,
+        )
+        drive_api = MagicMock()
+        drive_api.get_node_metadata = AsyncMock(return_value=None)
+        # when / then
+        with self.assertRaises(ValueError):
+            await svc.find_child_by_name(drive_api, "99", "child.txt")

@@ -43,6 +43,7 @@ class MediaEnrichService:
 
     def __init__(
         self,
+        *,
         local_path_service: LocalPathService,
         off_main: OffMainThreadService | None = None,
     ) -> None:

@@ -7,8 +7,8 @@
 # Other commands (gc, backfill, squash) use the same file; see --help.
 # backfill PATH is a virtual mirror path (/ = server root, then mount names and folders).
 
-# Config schema version. The current supported value is 1.
-version: 1
+# Config schema version. The current supported value is 2.
+version: 2
 
 # HTTP bind address (default: 127.0.0.1)
 host: "0.0.0.0"
@@ -18,14 +18,24 @@ port: 8080
 # SQLite database URL (only SQLite is supported; other backends will raise an error).
 database_url: "sqlite:////data/mirror.db"
 
-# Synology DSM / Drive API base URL (scheme + host + port if needed).
-synology_url: "https://nas.example.com:5001"
+# Synology API connection and webhook settings.
+synology:
+  # Synology DSM / Drive API base URL (scheme + host + port if needed).
+  url: "https://nas.example.com:5001"
 
-username: "your-drive-user"
-password: "your-password"
+  username: "your-drive-user"
+  password: "your-password"
 
-# Optional: TOTP code if the account uses 2FA (when required by the API).
-# otp_code: "123456"
+  # Optional: TOTP code if the account uses 2FA (when required by the API).
+  # otp_code: "123456"
+
+  # Webhook registration is required by the current server behavior.
+  webhook:
+    # Externally reachable base URL of this server.
+    callback_url: "https://my-server.example.com"
+    # Stable identifier for this app's webhook registration
+    # (default: wcpan-drive-synology).
+    # app_id: "wcpan-drive-synology"
 
 # Mount label -> Synology path as seen by File Station / Drive.
 # Labels appear as virtual node ids "_<label>" under the server root.
@@ -40,11 +50,6 @@ mounts:
 local_paths: {}
 # local_paths:
 #   "/volume1/photos": "/mnt/nas/photos"
-
-# Public base URL of this server (used to register the webhook with Synology Drive).
-public_url: "https://my-server.example.com"
-# Stable identifier for this app's webhook registration (default: wcpan-drive-synology).
-# webhook_app_id: "wcpan-drive-synology"
 
 # Optional: log file path for wcpan.logging (omit for stderr-only).
 # log_path: "/var/log/wcpan-drive-synology.log"

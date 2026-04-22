@@ -2,7 +2,7 @@
 
 from functools import partial
 
-from ...types import NodeRecord
+from ...types import MirrorStableId, NodeRecord
 from ..types import MetadataQueue, MetadataWorkItem, SynologyPath, WriteQueue
 from .enricher import MediaEnrichService
 from .off_main import OffMainThreadService
@@ -32,12 +32,12 @@ class NodeSyncService:
 
     def __init__(
         self,
+        *,
         storage: StorageService,
         write_queue: WriteQueue,
         off_main: OffMainThreadService,
         mounts: dict[str, SynologyPath],
         local_paths: dict[str, str],
-        *,
         metadata_queue: MetadataQueue,
     ) -> None:
         self._storage = storage
@@ -45,8 +45,15 @@ class NodeSyncService:
         self._mounts = mounts
         self._local_paths = local_paths
         self._metadata_queue = metadata_queue
-        local_path_service = LocalPathService(storage, mounts, local_paths)
-        self._enricher = MediaEnrichService(local_path_service, off_main)
+        local_path_service = LocalPathService(
+            storage=storage,
+            mounts=mounts,
+            local_paths=local_paths,
+        )
+        self._enricher = MediaEnrichService(
+            local_path_service=local_path_service,
+            off_main=off_main,
+        )
 
     @property
     def local_paths(self) -> dict[str, str]:
@@ -84,7 +91,7 @@ class NodeSyncService:
         )
         return record
 
-    async def delete(self, node_id: str) -> None:
+    async def delete(self, node_id: MirrorStableId) -> None:
         """Enqueue delete_subtree_and_emit_changes.
 
         Used by: API (delete node), webhook (file_removed).
@@ -134,12 +141,12 @@ class NodeSyncService:
         mq = self._metadata_queue
         await self._write_queue.join()
 
-        node_ids = [r.node_id for r in records]
+        node_ids = [r.id for r in records]
         existing = await self._storage.get_nodes_by_ids(node_ids)
 
         skip_batch: list[NodeRecord] = []
         for r in records:
-            db_rec = existing.get(r.node_id)
+            db_rec = existing.get(r.id)
             if db_rec is not None and _has_complete_media_dims(db_rec):
                 skip_batch.append(r)
             else:
@@ -190,7 +197,9 @@ class NodeSyncService:
         )
 
     async def apply_deferred_removals(
-        self, preserved: set[str], mount_ids: set[str]
+        self,
+        preserved: set[MirrorStableId],
+        mount_ids: set[MirrorStableId],
     ) -> None:
         """Enqueue apply_deferred_scan_removals. Used by scanner for end-of-scan cleanup."""
         await self._write_queue.put(

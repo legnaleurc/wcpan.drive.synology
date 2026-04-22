@@ -6,16 +6,16 @@ import logging
 import sys
 from contextlib import AsyncExitStack, suppress
 from logging.config import dictConfig
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
-import yaml  # type: ignore[import-untyped]
 from aiohttp import web
 from wcpan.logging import ConfigBuilder
 
+from .api import create_synology_drive_api
 from .app import create_app, managed_off_main
+from .config import ConfigVersionError, load_config
 from .lib.mounts import create_mount_registry
 from .services.backfill import BackfillService
-from .services.network import create_network_service
 from .services.paths import SynologyPathService
 from .services.storage import (
     SchemaVersionError,
@@ -24,7 +24,7 @@ from .services.storage import (
     reset_change_history,
 )
 from .services.sync import NodeSyncService
-from .types import RawServerConfig, ServerConfig, SynologyPath
+from .types import ServerConfig
 from .workers import (
     METADATA_WORKER_COUNT,
     create_metadata_queue,
@@ -35,11 +35,6 @@ from .workers import (
 
 
 _L = logging.getLogger(__name__)
-CONFIG_VERSION = 1
-
-
-class ConfigVersionError(ValueError):
-    """Raised when the YAML config schema version is missing or unsupported."""
 
 
 def main() -> None:
@@ -84,24 +79,20 @@ def main() -> None:
         print(f"Config file not found: {config_path}", file=sys.stderr)
         sys.exit(1)
 
-    with open(config_path) as f:
-        raw: RawServerConfig = yaml.safe_load(f)
-
     try:
-        _check_config_version(raw)
+        config = load_config(config_path)
 
         if args.command == "gc":
-            count = cleanup_dangling_nodes(raw["database_url"])
+            count = cleanup_dangling_nodes(config.database_url)
             print(f"Removed {count} dangling node(s).")
             return
 
         if args.command == "squash":
             print("WARNING: squash resets all consumer cursors.", file=sys.stderr)
-            count = reset_change_history(raw["database_url"])
+            count = reset_change_history(config.database_url)
             print(f"Reset change history: {count} update record(s) written.")
             return
 
-        config = _server_config_from_raw(raw)
         dictConfig(
             ConfigBuilder(path=config.log_path)
             .add("wcpan.drive.synology", level=args.log_level)
@@ -138,40 +129,6 @@ def main() -> None:
         sys.exit(1)
 
 
-def _check_config_version(raw: RawServerConfig) -> None:
-    if "version" not in raw:
-        raise ConfigVersionError(
-            f"config version mismatch: expected {CONFIG_VERSION}, got missing"
-        )
-    version = raw["version"]
-    if type(version) is not int:
-        raise ConfigVersionError(
-            f"config version mismatch: expected {CONFIG_VERSION}, got {version!r}"
-        )
-    if version != CONFIG_VERSION:
-        raise ConfigVersionError(
-            f"config version mismatch: expected {CONFIG_VERSION}, got {version}"
-        )
-
-
-def _server_config_from_raw(raw: RawServerConfig) -> ServerConfig:
-    return ServerConfig(
-        host=raw.get("host", "127.0.0.1"),
-        port=int(raw.get("port", 8080)),
-        database_url=raw["database_url"],
-        synology_url=raw["synology_url"],
-        username=raw["username"],
-        password=raw["password"],
-        mounts={k: SynologyPath(PurePosixPath(v)) for k, v in raw["mounts"].items()},
-        public_url=raw["public_url"],
-        webhook_app_id=raw.get("webhook_app_id", "wcpan-drive-synology"),
-        local_paths=raw["local_paths"],
-        otp_code=raw.get("otp_code"),
-        log_path=raw.get("log_path"),
-        upload_tmp_dir=raw.get("upload_tmp_dir"),
-    )
-
-
 async def run_backfill(
     config: ServerConfig,
     virtual_path: str,
@@ -180,16 +137,9 @@ async def run_backfill(
 ) -> dict[str, int]:
     """Build ``BackfillService`` with the same stack as server startup (no HTTP/webhook)."""
     async with AsyncExitStack() as stack:
-        network = await stack.enter_async_context(
-            create_network_service(
-                base_url=config.synology_url,
-                username=config.username,
-                password=config.password,
-                otp_code=config.otp_code,
-            )
-        )
+        drive_api = await stack.enter_async_context(create_synology_drive_api(config))
         off_main = await stack.enter_async_context(managed_off_main())
-        storage = await create_storage_service(config.database_url, off_main)
+        storage = await create_storage_service(config.database_url, off_main=off_main)
         write_queue = create_write_queue()
         metadata_queue = create_metadata_queue()
         node_sync = NodeSyncService(
@@ -200,10 +150,16 @@ async def run_backfill(
             local_paths=config.local_paths,
             metadata_queue=metadata_queue,
         )
-        mount_registry = await create_mount_registry(network, config.mounts)
-        syno_paths = SynologyPathService(mount_registry)
+        mount_registry = await create_mount_registry(
+            config.mounts,
+            drive_api=drive_api,
+        )
+        syno_paths = SynologyPathService(
+            registry=mount_registry,
+            storage=storage,
+        )
         backfill = BackfillService(
-            network=network,
+            drive_api=drive_api,
             storage=storage,
             syno_paths=syno_paths,
             node_sync=node_sync,

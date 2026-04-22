@@ -3,12 +3,12 @@
 import logging
 from pathlib import PurePosixPath
 
-from ...types import NodeRecord
+from ...types import MirrorStableId, NodeRecord
+from ..api.drive import SynologyDriveApi
+from ..api.lib import convert_file_info
 from ..lib.bfs import parallel_bfs
 from ..lib.mounts import SERVER_ROOT_ID
-from ..lib.nodes import convert_file_info
 from ..types import VirtualPath
-from .network import NetworkService
 from .paths import SynologyPathService, VirtualPathService
 from .storage import StorageService
 from .sync import NodeSyncService
@@ -40,6 +40,8 @@ def _reconcile_api_fields_differ(db: NodeRecord, merged: NodeRecord) -> bool:
         return True
     if db.mime_type != merged.mime_type:
         return True
+    if db.mutable_id != merged.mutable_id:
+        return True
     return False
 
 
@@ -49,16 +51,20 @@ class BackfillService:
     def __init__(
         self,
         *,
-        network: NetworkService,
+        drive_api: SynologyDriveApi | None = None,
+        network: SynologyDriveApi | None = None,
         storage: StorageService,
         syno_paths: SynologyPathService,
         node_sync: NodeSyncService,
     ) -> None:
-        self._network = network
+        resolved_drive_api = drive_api or network
+        if resolved_drive_api is None:
+            raise ValueError("drive_api is required")
+        self._drive_api: SynologyDriveApi = resolved_drive_api
         self._storage = storage
         self._syno_paths = syno_paths
         self._node_sync = node_sync
-        self._virtual_paths = VirtualPathService(storage)
+        self._virtual_paths = VirtualPathService(storage=storage)
 
     async def run_virtual_path(
         self, virtual_path: str, *, dry_run: bool = False
@@ -70,43 +76,48 @@ class BackfillService:
         return await self._reconcile_subtree(root_id, dry_run=dry_run)
 
     async def _reconcile_subtree(
-        self, root_node_id: str, *, dry_run: bool = False
+        self,
+        root_node_id: MirrorStableId,
+        *,
+        dry_run: bool = False,
     ) -> dict[str, int]:
         """Reconcile: full API vs DB compare per folder; writes via NodeSyncService."""
         cs = self._node_sync
 
         if root_node_id == SERVER_ROOT_ID:
             roots = await self._storage.get_children(root_node_id)
-            initial = [c.node_id for c in roots]
+            initial = [c.id for c in roots]
         else:
             initial = [root_node_id]
 
         checked = added = updated = removed = list_errors = 0
 
-        async def _visit(parent_id: str) -> list[str]:
+        async def _visit(parent_id: MirrorStableId) -> list[MirrorStableId]:
             nonlocal checked, added, updated, removed, list_errors
             try:
-                items = await self._syno_paths.list_children(self._network, parent_id)
+                items = await self._syno_paths.list_children(self._drive_api, parent_id)
             except Exception:
                 _L.exception("Failed to list parent %r", parent_id)
                 list_errors += 1
                 return []
 
             db_children = await self._storage.get_children(parent_id)
-            db_by_id: dict[str, NodeRecord] = {r.node_id: r for r in db_children}
-            children: list[str] = []
+            db_by_id: dict[MirrorStableId, NodeRecord] = {r.id: r for r in db_children}
+            children: list[MirrorStableId] = []
 
             for item in items:
                 checked += 1
-                fid = item["file_id"]
                 from_api = convert_file_info(item, parent_id=parent_id)
-                existing = db_by_id.get(fid)
+                if from_api is None:
+                    continue
+                node_id = from_api.id
+                existing = db_by_id.get(node_id)
 
                 if existing is None:
                     added += 1
                     _L.info(
                         "Adding missing node %r (%r) under %r",
-                        fid,
+                        node_id,
                         item["name"],
                         parent_id,
                     )
@@ -116,25 +127,33 @@ class BackfillService:
                     if _reconcile_api_fields_differ(existing, from_api):
                         updated += 1
                         if dry_run:
-                            _L.info("dry-run: would update %r (%r)", fid, item["name"])
+                            _L.info(
+                                "dry-run: would update %r (%r)",
+                                node_id,
+                                item["name"],
+                            )
                         else:
                             await cs.reconcile_update(from_api, existing)
 
                 if item["type"] == "dir":
-                    children.append(fid)
+                    children.append(node_id)
 
-            api_ids = {item["file_id"] for item in items}
-            for fid, existing in db_by_id.items():
-                if fid not in api_ids:
+            api_ids = {
+                r.id
+                for item in items
+                if (r := convert_file_info(item, parent_id=parent_id)) is not None
+            }
+            for node_id, existing in db_by_id.items():
+                if node_id not in api_ids:
                     removed += 1
                     _L.info(
                         "Removing node %r (%r) absent from API under %r",
-                        fid,
+                        node_id,
                         existing.name,
                         parent_id,
                     )
                     if not dry_run:
-                        await cs.delete(existing.node_id)
+                        await cs.delete(existing.id)
 
             return children
 

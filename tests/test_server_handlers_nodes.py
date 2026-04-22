@@ -21,30 +21,34 @@ from wcpan.drive.synology._server.handlers.nodes import (
 )
 from wcpan.drive.synology._server.keys import (
     CHANGE_SERVICE_KEY,
-    NETWORK_KEY,
     OFF_MAIN_KEY,
     READY_KEY,
     STORAGE_KEY,
+    SYNOLOGY_DRIVE_API_KEY,
     SYNOLOGY_PATH_KEY,
-    UPLOAD_SESSIONS_KEY,
+    UPLOAD_SERVICE_KEY,
     WRITE_QUEUE_KEY,
 )
 from wcpan.drive.synology._server.lib.mounts import MountRegistry
 from wcpan.drive.synology._server.services.paths import SynologyPathService
 from wcpan.drive.synology._server.services.sync import NodeSyncService
-from wcpan.drive.synology._server.services.upload import UploadSessionService
+from wcpan.drive.synology._server.services.upload import (
+    UploadService,
+    UploadSessionStore,
+)
 from wcpan.drive.synology._server.workers import create_write_queue
 from wcpan.drive.synology.exceptions import (
     SynologyUploadConflictError,
     SynologyUploadError,
 )
-from wcpan.drive.synology.types import NodeRecord
+from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
 _EPOCH = datetime.fromtimestamp(0, UTC)
 
 _FAKE_SYNO_INFO = {
     "file_id": "new-dir",
+    "permanent_link": "new-dir",
     "name": "docs",
     "type": "dir",
     "content_type": "dir",
@@ -53,17 +57,6 @@ _FAKE_SYNO_INFO = {
     "modified_time": 1_000_000,
     "sync_id": 1,
 }
-
-_PATCH_CREATE = (
-    "wcpan.drive.synology._server.handlers.nodes.synology_files.create_folder"
-)
-_PATCH_RENAME = "wcpan.drive.synology._server.handlers.nodes.synology_files.rename_file"
-_PATCH_MOVE = "wcpan.drive.synology._server.handlers.nodes.synology_files.move_file"
-_PATCH_DELETE = "wcpan.drive.synology._server.handlers.nodes.synology_files.delete_file"
-_PATCH_UPLOAD = "wcpan.drive.synology._server.handlers.nodes.synology_files.upload_file"
-_PATCH_DOWNLOAD = (
-    "wcpan.drive.synology._server.handlers.nodes.synology_files.download_file"
-)
 
 
 class _FakeOffMain:
@@ -82,7 +75,7 @@ class _FakeStorage:
         return self._nodes.get(node_id)
 
     async def upsert_node_and_emit_change(self, record: NodeRecord) -> None:
-        self._nodes[record.node_id] = record
+        self._nodes[record.id] = record
 
     async def delete_subtree_and_emit_changes(self, node_id: str) -> None:
         self._nodes.pop(node_id, None)
@@ -98,7 +91,7 @@ def _make_node(
     size: int = 100,
 ) -> NodeRecord:
     return NodeRecord(
-        node_id=node_id,
+        id=node_id,
         parent_id=parent_id,
         name=name,
         is_directory=is_directory,
@@ -112,6 +105,31 @@ def _make_node(
         width=0,
         height=0,
         ms_duration=0,
+        mutable_id=MirrorMutableId(str(node_id)),
+    )
+
+
+def _make_dir(
+    node_id: str,
+    parent_id: str | None = None,
+    name: str | None = None,
+) -> NodeRecord:
+    return NodeRecord(
+        id=node_id,
+        parent_id=parent_id,
+        name=name or node_id,
+        is_directory=True,
+        ctime=_EPOCH,
+        mtime=_EPOCH,
+        mime_type="application/x-directory",
+        hash="",
+        size=0,
+        is_image=False,
+        is_video=False,
+        width=0,
+        height=0,
+        ms_duration=0,
+        mutable_id=MirrorMutableId(str(node_id)),
     )
 
 
@@ -120,16 +138,39 @@ def _make_app(storage: _FakeStorage) -> web.Application:
     off_main = _FakeOffMain()
     wq = create_write_queue()
     tmp = tempfile.mkdtemp(prefix="wcpan_test_")
+    store = UploadSessionStore(tmp_dir=Path(tmp))
+    storage._nodes.setdefault("p1", _make_dir("p1"))
+    storage._nodes.setdefault("new-parent", _make_dir("new-parent"))
+    storage._nodes.setdefault("bad", _make_dir("bad"))
+    syno_paths = SynologyPathService(
+        registry=MountRegistry(mounts={}, root_ids={}),
+        storage=storage,  # type: ignore[arg-type]
+    )
+    node_sync = NodeSyncService(
+        storage=storage,
+        write_queue=wq,
+        off_main=off_main,
+        mounts={},
+        local_paths={},
+        metadata_queue=asyncio.Queue(),
+    )  # type: ignore[arg-type]
+    drive_api = MagicMock()
+    drive_api.list_folder_all = AsyncMock(return_value=[])
+    drive_api.get_node_metadata = AsyncMock(return_value=None)
+    drive_api.get_file_metadata_by_path = AsyncMock(return_value=None)
     app[READY_KEY] = True
     app[STORAGE_KEY] = storage
     app[OFF_MAIN_KEY] = off_main
     app[WRITE_QUEUE_KEY] = wq
-    app[UPLOAD_SESSIONS_KEY] = UploadSessionService(tmp_dir=Path(tmp))
-    app[SYNOLOGY_PATH_KEY] = SynologyPathService(MountRegistry({}, {}))
-    app[CHANGE_SERVICE_KEY] = NodeSyncService(
-        storage, wq, off_main, {}, {}, metadata_queue=asyncio.Queue()
-    )  # type: ignore[arg-type]
-    app[NETWORK_KEY] = MagicMock()
+    app[SYNOLOGY_PATH_KEY] = syno_paths
+    app[CHANGE_SERVICE_KEY] = node_sync
+    app[SYNOLOGY_DRIVE_API_KEY] = drive_api
+    app[UPLOAD_SERVICE_KEY] = UploadService(
+        store=store,
+        node_sync=node_sync,
+        drive_api=drive_api,
+        syno_paths=syno_paths,
+    )
 
     app.router.add_get("/api/v1/nodes/{id}", get_node)
     app.router.add_get("/api/v1/nodes/{id}/download", download_node)
@@ -155,7 +196,7 @@ class TestGetNode(IsolatedAsyncioTestCase):
             resp = await client.get("/api/v1/nodes/n1")
             self.assertEqual(resp.status, 200)
             record = node_record_from_dict(await resp.json())
-        self.assertEqual(record.node_id, "n1")
+        self.assertEqual(record.id, "n1")
         self.assertEqual(record.name, "test.txt")
 
     async def test_not_found(self):
@@ -175,7 +216,12 @@ class TestCreateNode(IsolatedAsyncioTestCase):
     async def test_success(self):
         storage = _FakeStorage()
         app = _make_app(storage)
-        with patch(_PATCH_CREATE, new_callable=AsyncMock, return_value=_FAKE_SYNO_INFO):
+        with patch.object(
+            app[SYNOLOGY_DRIVE_API_KEY],
+            "create_folder",
+            new_callable=AsyncMock,
+            return_value=_FAKE_SYNO_INFO,
+        ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
                     "/api/v1/nodes",
@@ -183,7 +229,7 @@ class TestCreateNode(IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(resp.status, 201)
                 record = node_record_from_dict(await resp.json())
-        self.assertEqual(record.node_id, "new-dir")
+        self.assertEqual(record.id, "new-dir")
         self.assertTrue(record.is_directory)
 
     async def test_missing_name(self):
@@ -224,7 +270,12 @@ class TestUpdateNode(IsolatedAsyncioTestCase):
             "hash": "abc",
             "size": 100,
         }
-        with patch(_PATCH_RENAME, new_callable=AsyncMock, return_value=rename_result):
+        with patch.object(
+            app[SYNOLOGY_DRIVE_API_KEY],
+            "rename_node",
+            new_callable=AsyncMock,
+            return_value=rename_result,
+        ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.patch(
                     "/api/v1/nodes/n1",
@@ -238,7 +289,50 @@ class TestUpdateNode(IsolatedAsyncioTestCase):
         storage = _FakeStorage()
         storage._nodes["n1"] = _make_node()
         app = _make_app(storage)
-        with patch(_PATCH_MOVE, new_callable=AsyncMock):
+        app[SYNOLOGY_DRIVE_API_KEY].move_node = AsyncMock()
+        app[SYNOLOGY_DRIVE_API_KEY].get_node_metadata = AsyncMock(return_value=None)
+        app[SYNOLOGY_DRIVE_API_KEY].list_folder_all = AsyncMock(return_value=[])
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.patch(
+                "/api/v1/nodes/n1",
+                json={"parent_id": "new-parent"},
+            )
+            self.assertEqual(resp.status, 200)
+            record = node_record_from_dict(await resp.json())
+        self.assertEqual(record.parent_id, "new-parent")
+        self.assertEqual(record.id, "n1")
+
+    async def test_move_refreshes_mutable_id_via_permanent_link(self):
+        storage = _FakeStorage()
+        storage._nodes["n1"] = _make_node()
+        app = _make_app(storage)
+        node_sync = app[CHANGE_SERVICE_KEY]
+        with (
+            patch.object(
+                app[SYNOLOGY_DRIVE_API_KEY],
+                "move_node",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                app[SYNOLOGY_DRIVE_API_KEY],
+                "get_node_metadata",
+                new_callable=AsyncMock,
+                return_value={
+                    "file_id": "n2",
+                    "parent_id": "new-parent",
+                    "permanent_link": "n1",
+                    "name": "test.txt",
+                    "type": "file",
+                    "content_type": "document",
+                    "size": 100,
+                    "created_time": 1000,
+                    "modified_time": 2000,
+                    "sync_id": 1,
+                    "hash": "def",
+                },
+            ),
+            patch.object(node_sync, "delete", new_callable=AsyncMock) as delete_mock,
+        ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.patch(
                     "/api/v1/nodes/n1",
@@ -246,14 +340,18 @@ class TestUpdateNode(IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(resp.status, 200)
                 record = node_record_from_dict(await resp.json())
+        delete_mock.assert_not_awaited()
+        self.assertEqual(record.id, "n1")
         self.assertEqual(record.parent_id, "new-parent")
+        self.assertEqual(record.mutable_id, "n2")
 
     async def test_rename_conflict(self):
         storage = _FakeStorage()
         storage._nodes["n1"] = _make_node()
         app = _make_app(storage)
-        with patch(
-            _PATCH_RENAME,
+        with patch.object(
+            app[SYNOLOGY_DRIVE_API_KEY],
+            "rename_node",
             new_callable=AsyncMock,
             side_effect=SynologyUploadConflictError("exists", file_name="x"),
         ):
@@ -289,8 +387,9 @@ class TestUpdateNode(IsolatedAsyncioTestCase):
         storage = _FakeStorage()
         storage._nodes["n1"] = _make_node()
         app = _make_app(storage)
-        with patch(
-            _PATCH_MOVE,
+        with patch.object(
+            app[SYNOLOGY_DRIVE_API_KEY],
+            "move_node",
             new_callable=AsyncMock,
             side_effect=Exception("move failed"),
         ):
@@ -312,7 +411,11 @@ class TestDeleteNode(IsolatedAsyncioTestCase):
         storage = _FakeStorage()
         storage._nodes["n1"] = _make_node()
         app = _make_app(storage)
-        with patch(_PATCH_DELETE, new_callable=AsyncMock):
+        with patch.object(
+            app[SYNOLOGY_DRIVE_API_KEY],
+            "delete_node",
+            new_callable=AsyncMock,
+        ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.delete("/api/v1/nodes/n1")
                 self.assertEqual(resp.status, 204)
@@ -344,6 +447,7 @@ class TestUploadNode(IsolatedAsyncioTestCase):
         app = _make_app(storage)
         upload_info = {
             "file_id": "uploaded-1",
+            "permanent_link": "uploaded-1",
             "name": "data.bin",
             "type": "file",
             "content_type": "file",
@@ -352,7 +456,12 @@ class TestUploadNode(IsolatedAsyncioTestCase):
             "modified_time": 1000,
             "sync_id": 1,
         }
-        with patch(_PATCH_UPLOAD, new_callable=AsyncMock, return_value=upload_info):
+        with patch.object(
+            app[SYNOLOGY_DRIVE_API_KEY],
+            "upload_file",
+            new_callable=AsyncMock,
+            return_value=upload_info,
+        ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
                     "/api/v1/nodes/p1/upload",
@@ -361,7 +470,7 @@ class TestUploadNode(IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(resp.status, 201)
                 record = node_record_from_dict(await resp.json())
-        self.assertEqual(record.node_id, "uploaded-1")
+        self.assertEqual(record.id, "uploaded-1")
         self.assertEqual(record.name, "data.bin")
 
     async def test_missing_name(self):
@@ -388,8 +497,9 @@ class TestUploadNode(IsolatedAsyncioTestCase):
     async def test_upload_error(self):
         storage = _FakeStorage()
         app = _make_app(storage)
-        with patch(
-            _PATCH_UPLOAD,
+        with patch.object(
+            app[SYNOLOGY_DRIVE_API_KEY],
+            "upload_file",
             new_callable=AsyncMock,
             side_effect=SynologyUploadError("fail", file_name="x"),
         ):
@@ -400,6 +510,48 @@ class TestUploadNode(IsolatedAsyncioTestCase):
                     params={"name": "x.bin"},
                 )
                 self.assertEqual(resp.status, 503)
+
+    async def test_conflict_returns_409_without_hitting_synology_upload(self):
+        storage = _FakeStorage()
+        app = _make_app(storage)
+        app[SYNOLOGY_DRIVE_API_KEY].get_node_metadata = AsyncMock(
+            return_value={
+                "file_id": "p1",
+                "permanent_link": "p1",
+                "parent_id": "root",
+                "display_path": "/volume1/p1",
+                "name": "p1",
+                "type": "dir",
+                "content_type": "dir",
+                "size": 0,
+                "created_time": 1000,
+                "modified_time": 1000,
+                "sync_id": 0,
+            }
+        )
+        app[SYNOLOGY_DRIVE_API_KEY].get_file_metadata_by_path = AsyncMock(
+            return_value={
+                "file_id": "existing-1",
+                "permanent_link": "existing-1",
+                "parent_id": "p1",
+                "display_path": "/volume1/p1/data.bin",
+                "name": "data.bin",
+                "type": "file",
+                "content_type": "file",
+                "size": 5,
+                "created_time": 1000,
+                "modified_time": 1000,
+                "sync_id": 1,
+            }
+        )
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/v1/nodes/p1/upload",
+                data=b"hello",
+                params={"name": "data.bin"},
+            )
+            self.assertEqual(resp.status, 409)
+        app[SYNOLOGY_DRIVE_API_KEY].upload_file.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -59,7 +59,8 @@ def _patch_cm(
 
 def _node_dict() -> dict:
     return {
-        "node_id": "node-1",
+        "id": "node-1",
+        "mutable_id": "node-1",
         "parent_id": "parent-1",
         "name": "file.bin",
         "is_directory": False,

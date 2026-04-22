@@ -29,12 +29,12 @@ from wcpan.drive.synology._server.handlers.upload import (
 )
 from wcpan.drive.synology._server.keys import (
     CHANGE_SERVICE_KEY,
-    NETWORK_KEY,
     OFF_MAIN_KEY,
     READY_KEY,
     STORAGE_KEY,
+    SYNOLOGY_DRIVE_API_KEY,
     SYNOLOGY_PATH_KEY,
-    UPLOAD_SESSIONS_KEY,
+    UPLOAD_SERVICE_KEY,
     WRITE_QUEUE_KEY,
 )
 from wcpan.drive.synology._server.lib.mounts import MountRegistry
@@ -43,9 +43,12 @@ from wcpan.drive.synology._server.services.paths import (
     SynologyPathService,
 )
 from wcpan.drive.synology._server.services.sync import NodeSyncService
-from wcpan.drive.synology._server.services.upload import UploadSessionService
+from wcpan.drive.synology._server.services.upload import (
+    UploadService,
+    UploadSessionStore,
+)
 from wcpan.drive.synology._server.workers import create_write_queue
-from wcpan.drive.synology.types import NodeRecord
+from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
 _EPOCH = datetime.fromtimestamp(0, UTC)
@@ -53,6 +56,7 @@ _EPOCH = datetime.fromtimestamp(0, UTC)
 # Fake Synology file metadata returned by the patched upload_file call.
 _FAKE_SYNO_INFO = {
     "file_id": "syno-99",
+    "permanent_link": "syno-99",
     "name": "photo.jpg",
     "type": "file",
     "content_type": "image",
@@ -61,13 +65,6 @@ _FAKE_SYNO_INFO = {
     "modified_time": 1_000_000,
     "hash": "abc123",
 }
-
-_UPLOAD_FILE_NODES = (
-    "wcpan.drive.synology._server.handlers.nodes.synology_files.upload_file"
-)
-_UPLOAD_FILE_SESSIONS = (
-    "wcpan.drive.synology._server.handlers.upload.synology_files.upload_file"
-)
 
 
 class _FakeOffMain:
@@ -88,26 +85,65 @@ class _FakeStorage:
         return self._nodes.get(node_id)
 
     async def upsert_node_and_emit_change(self, record: NodeRecord) -> None:
-        self._nodes[record.node_id] = record
+        self._nodes[record.id] = record
 
 
 def _make_app(
     storage: _FakeStorage,
-    session_store: UploadSessionService,
+    session_store: UploadSessionStore,
 ) -> web.Application:
     app = web.Application()
     off_main = _FakeOffMain()
     wq = create_write_queue()
+    storage._nodes.setdefault(
+        "parent-a",
+        NodeRecord(
+            id="parent-a",
+            parent_id=None,
+            name="parent-a",
+            is_directory=True,
+            ctime=_EPOCH,
+            mtime=_EPOCH,
+            mime_type="application/x-directory",
+            hash="",
+            size=0,
+            is_image=False,
+            is_video=False,
+            width=0,
+            height=0,
+            ms_duration=0,
+            mutable_id=MirrorMutableId("parent-a"),
+        ),
+    )
+    syno_paths = SynologyPathService(
+        registry=MountRegistry(mounts={}, root_ids={}),
+        storage=storage,  # type: ignore[arg-type]
+    )
+    node_sync = NodeSyncService(
+        storage=storage,
+        write_queue=wq,
+        off_main=off_main,
+        mounts={},
+        local_paths={},
+        metadata_queue=asyncio.Queue(),
+    )  # type: ignore[arg-type]
+    drive_api = MagicMock()
+    drive_api.list_folder_all = AsyncMock(return_value=[])
+    drive_api.get_node_metadata = AsyncMock(return_value=None)
+    drive_api.get_file_metadata_by_path = AsyncMock(return_value=None)
     app[READY_KEY] = True
     app[STORAGE_KEY] = storage
     app[OFF_MAIN_KEY] = off_main
     app[WRITE_QUEUE_KEY] = wq
-    app[UPLOAD_SESSIONS_KEY] = session_store
-    app[SYNOLOGY_PATH_KEY] = SynologyPathService(MountRegistry({}, {}))
-    app[CHANGE_SERVICE_KEY] = NodeSyncService(
-        storage, wq, off_main, {}, {}, metadata_queue=asyncio.Queue()
-    )  # type: ignore[arg-type]
-    app[NETWORK_KEY] = MagicMock()
+    app[SYNOLOGY_PATH_KEY] = syno_paths
+    app[CHANGE_SERVICE_KEY] = node_sync
+    app[SYNOLOGY_DRIVE_API_KEY] = drive_api
+    app[UPLOAD_SERVICE_KEY] = UploadService(
+        store=session_store,
+        node_sync=node_sync,
+        drive_api=drive_api,
+        syno_paths=syno_paths,
+    )
 
     app.router.add_get("/api/v1/root", get_root)
     app.router.add_put("/null", put_null)
@@ -124,7 +160,7 @@ class TestMediaInfoContract(IsolatedAsyncioTestCase):
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="wcpan_test_")
-        self._session_store = UploadSessionService(tmp_dir=Path(self._tmp.name))
+        self._session_store = UploadSessionStore(tmp_dir=Path(self._tmp.name))
 
     def tearDown(self) -> None:
         self._session_store.close_all()
@@ -144,8 +180,11 @@ class TestMediaInfoContract(IsolatedAsyncioTestCase):
         )
         params = _media_info_to_params(media)
 
-        with patch(
-            _UPLOAD_FILE_SESSIONS, new_callable=AsyncMock, return_value=_FAKE_SYNO_INFO
+        with patch.object(
+            app[SYNOLOGY_DRIVE_API_KEY],
+            "upload_file",
+            new_callable=AsyncMock,
+            return_value=_FAKE_SYNO_INFO,
         ):
             async with TestClient(TestServer(app)) as client:
                 # Step 1 — create session
@@ -184,8 +223,11 @@ class TestMediaInfoContract(IsolatedAsyncioTestCase):
         )
         params = _media_info_to_params(media)
 
-        with patch(
-            _UPLOAD_FILE_NODES, new_callable=AsyncMock, return_value=_FAKE_SYNO_INFO
+        with patch.object(
+            app[SYNOLOGY_DRIVE_API_KEY],
+            "upload_file",
+            new_callable=AsyncMock,
+            return_value=_FAKE_SYNO_INFO,
         ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
@@ -215,8 +257,11 @@ class TestMediaInfoContract(IsolatedAsyncioTestCase):
         )
         params = _media_info_to_params(media)
 
-        with patch(
-            _UPLOAD_FILE_SESSIONS, new_callable=AsyncMock, return_value=syno_info
+        with patch.object(
+            app[SYNOLOGY_DRIVE_API_KEY],
+            "upload_file",
+            new_callable=AsyncMock,
+            return_value=syno_info,
         ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
@@ -246,7 +291,7 @@ class TestNodeRecordRoundTrip(IsolatedAsyncioTestCase):
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="wcpan_test_")
-        self._session_store = UploadSessionService(tmp_dir=Path(self._tmp.name))
+        self._session_store = UploadSessionStore(tmp_dir=Path(self._tmp.name))
 
     def tearDown(self) -> None:
         self._session_store.close_all()
@@ -256,7 +301,7 @@ class TestNodeRecordRoundTrip(IsolatedAsyncioTestCase):
         """ctime/mtime timezone info is preserved through server JSON serialization."""
         storage = _FakeStorage()
         root = NodeRecord(
-            node_id=SERVER_ROOT_ID,
+            id=SERVER_ROOT_ID,
             parent_id=None,
             name="root",
             is_directory=True,
@@ -270,6 +315,7 @@ class TestNodeRecordRoundTrip(IsolatedAsyncioTestCase):
             width=0,
             height=0,
             ms_duration=0,
+            mutable_id=MirrorMutableId(""),
         )
         storage._nodes[SERVER_ROOT_ID] = root
         app = _make_app(storage, self._session_store)
@@ -279,7 +325,7 @@ class TestNodeRecordRoundTrip(IsolatedAsyncioTestCase):
             self.assertEqual(resp.status, 200)
             record = node_record_from_dict(await resp.json())
 
-        self.assertEqual(record.node_id, SERVER_ROOT_ID)
+        self.assertEqual(record.id, SERVER_ROOT_ID)
         self.assertIsNotNone(record.ctime.tzinfo)
         self.assertIsNotNone(record.mtime.tzinfo)
         self.assertEqual(record.ctime, _EPOCH)
@@ -289,7 +335,7 @@ class TestNodeRecordRoundTrip(IsolatedAsyncioTestCase):
 class TestNullUploadSink(IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="wcpan_test_")
-        self._session_store = UploadSessionService(tmp_dir=Path(self._tmp.name))
+        self._session_store = UploadSessionStore(tmp_dir=Path(self._tmp.name))
 
     def tearDown(self) -> None:
         self._session_store.close_all()
@@ -316,7 +362,7 @@ class TestUploadSessionProtocol(IsolatedAsyncioTestCase):
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="wcpan_test_")
-        self._session_store = UploadSessionService(tmp_dir=Path(self._tmp.name))
+        self._session_store = UploadSessionStore(tmp_dir=Path(self._tmp.name))
 
     def tearDown(self) -> None:
         self._session_store.close_all()
@@ -327,8 +373,11 @@ class TestUploadSessionProtocol(IsolatedAsyncioTestCase):
         storage = _FakeStorage()
         app = _make_app(storage, self._session_store)
 
-        with patch(
-            _UPLOAD_FILE_SESSIONS, new_callable=AsyncMock, return_value=_FAKE_SYNO_INFO
+        with patch.object(
+            app[SYNOLOGY_DRIVE_API_KEY],
+            "upload_file",
+            new_callable=AsyncMock,
+            return_value=_FAKE_SYNO_INFO,
         ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
@@ -346,7 +395,7 @@ class TestUploadSessionProtocol(IsolatedAsyncioTestCase):
                 self.assertEqual(resp2.status, 201)
                 record = node_record_from_dict(await resp2.json())
 
-        self.assertEqual(record.node_id, "syno-99")
+        self.assertEqual(record.id, "syno-99")
         self.assertEqual(record.name, "photo.jpg")
 
     async def test_partial_patch_returns_204(self) -> None:

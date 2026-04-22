@@ -6,7 +6,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from wcpan.drive.synology._server.lib.mounts import MountRegistry
 from wcpan.drive.synology._server.services.off_main import OffMainThreadService
@@ -41,9 +41,14 @@ class TestScannerWriteBack(IsolatedAsyncioTestCase):
             pre_scan_result = scan_result
         q = create_write_queue()
         with ThreadPoolExecutor(2) as pool:
-            off_main = OffMainThreadService(pool)
+            off_main = OffMainThreadService(pool=pool)
             cs = NodeSyncService(
-                storage, q, off_main, mounts, {}, metadata_queue=asyncio.Queue()
+                storage=storage,
+                write_queue=q,
+                off_main=off_main,
+                mounts=mounts,
+                local_paths={},
+                metadata_queue=asyncio.Queue(),
             )
             drain = asyncio.create_task(self._drain_writes(q))
             try:
@@ -53,9 +58,12 @@ class TestScannerWriteBack(IsolatedAsyncioTestCase):
                     new=AsyncMock(return_value=(scan_result, pre_scan_result)),
                 ):
                     svc = StartupScanService(
-                        network=None,  # type: ignore[arg-type]
+                        drive_api=MagicMock(),
                         storage=storage,
-                        syno_paths=SynologyPathService(MountRegistry(mounts, {})),
+                        syno_paths=SynologyPathService(
+                            registry=MountRegistry(mounts=mounts, root_ids={}),
+                            storage=storage,
+                        ),
                         node_sync=cs,
                     )
                     await svc.run_initial_scan()
@@ -71,7 +79,9 @@ class TestScannerWriteBack(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(db_path, OffMainThreadService(pool))
+                storage = StorageService(
+                    db_path, off_main=OffMainThreadService(pool=pool)
+                )
                 await storage.ensure_schema()
                 mounts = {"a": "/vol/a", "b": "/vol/b"}
 
@@ -88,7 +98,9 @@ class TestScannerWriteBack(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(db_path, OffMainThreadService(pool))
+                storage = StorageService(
+                    db_path, off_main=OffMainThreadService(pool=pool)
+                )
                 await storage.ensure_schema()
                 mounts = {"a": "/vol/a", "b": "/vol/b"}
                 # Seed existing per-mount state
@@ -108,7 +120,9 @@ class TestScannerWriteBack(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(db_path, OffMainThreadService(pool))
+                storage = StorageService(
+                    db_path, off_main=OffMainThreadService(pool=pool)
+                )
                 await storage.ensure_schema()
                 mounts = {"a": "/vol/a", "b": "/vol/b"}
                 await storage.set_mount_state("a", "/vol/a", 100)
@@ -133,7 +147,9 @@ class TestScannerWriteBack(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(db_path, OffMainThreadService(pool))
+                storage = StorageService(
+                    db_path, off_main=OffMainThreadService(pool=pool)
+                )
                 await storage.ensure_schema()
                 mounts = {"a": "/vol/a"}
 

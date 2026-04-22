@@ -24,7 +24,7 @@ from wcpan.drive.synology._server.keys import (
 from wcpan.drive.synology._server.services.paths import SERVER_ROOT_ID
 from wcpan.drive.synology._server.services.sync import NodeSyncService
 from wcpan.drive.synology._server.workers import create_write_queue
-from wcpan.drive.synology.types import NodeRecord
+from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
 _EPOCH = datetime.fromtimestamp(0, UTC)
@@ -32,7 +32,7 @@ _EPOCH = datetime.fromtimestamp(0, UTC)
 
 def _make_node(node_id: str = "n1", parent_id: str | None = "p1") -> NodeRecord:
     return NodeRecord(
-        node_id=node_id,
+        id=node_id,
         parent_id=parent_id,
         name="x",
         is_directory=False,
@@ -46,6 +46,7 @@ def _make_node(node_id: str = "n1", parent_id: str | None = "p1") -> NodeRecord:
         width=0,
         height=0,
         ms_duration=0,
+        mutable_id=MirrorMutableId(node_id),
     )
 
 
@@ -75,7 +76,7 @@ class _FakeStorage:
         return self._changes[:max_size], self._cursor, len(self._changes) > max_size
 
     async def upsert_node_and_emit_change(self, record: NodeRecord) -> None:
-        self._nodes[record.node_id] = record
+        self._nodes[record.id] = record
 
 
 def _make_app(storage: _FakeStorage) -> web.Application:
@@ -87,7 +88,12 @@ def _make_app(storage: _FakeStorage) -> web.Application:
     app[OFF_MAIN_KEY] = off_main
     app[WRITE_QUEUE_KEY] = wq
     app[CHANGE_SERVICE_KEY] = NodeSyncService(
-        storage, wq, off_main, {}, {}, metadata_queue=asyncio.Queue()
+        storage=storage,
+        write_queue=wq,
+        off_main=off_main,
+        mounts={},
+        local_paths={},
+        metadata_queue=asyncio.Queue(),
     )  # type: ignore[arg-type]
 
     app.router.add_get("/api/v1/cursor", get_cursor)
@@ -121,7 +127,7 @@ class TestGetRoot(IsolatedAsyncioTestCase):
     async def test_returns_root(self):
         storage = _FakeStorage()
         root = NodeRecord(
-            node_id=SERVER_ROOT_ID,
+            id=SERVER_ROOT_ID,
             parent_id=None,
             name="root",
             is_directory=True,
@@ -135,6 +141,7 @@ class TestGetRoot(IsolatedAsyncioTestCase):
             width=0,
             height=0,
             ms_duration=0,
+            mutable_id=MirrorMutableId(""),
         )
         storage._nodes[SERVER_ROOT_ID] = root
         app = _make_app(storage)
@@ -142,7 +149,7 @@ class TestGetRoot(IsolatedAsyncioTestCase):
             resp = await client.get("/api/v1/root")
             self.assertEqual(resp.status, 200)
             record = node_record_from_dict(await resp.json())
-        self.assertEqual(record.node_id, SERVER_ROOT_ID)
+        self.assertEqual(record.id, SERVER_ROOT_ID)
 
     async def test_not_found(self):
         storage = _FakeStorage()

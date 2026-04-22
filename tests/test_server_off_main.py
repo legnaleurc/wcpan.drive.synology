@@ -9,7 +9,7 @@ from wcpan.drive.synology._server.services.off_main import OffMainThreadService
 class TestOffMainThreadService(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._pool = ThreadPoolExecutor(max_workers=2)
-        self._off = OffMainThreadService(self._pool)
+        self._off = OffMainThreadService(pool=self._pool)
 
     async def asyncTearDown(self) -> None:
         self._pool.shutdown(wait=True)

@@ -2,16 +2,16 @@
 
 import asyncio
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from logging import getLogger
-from typing import override
+from typing import cast, override
 
 from aiohttp import ClientSession, ClientTimeout
 from wcpan.drive.core.exceptions import NodeExistsError
 from wcpan.drive.core.types import MediaInfo, Node, WritableFile
 
-from .._lib import node_from_record, node_record_from_dict
+from .._lib import NodeRecordDict, node_from_record, node_record_from_dict
 from ..exceptions import SynologyUploadError
 from .http409 import node_from_409
 
@@ -49,7 +49,7 @@ async def create_writable(
     size: int | None,
     mime_type: str | None,
     media_info: MediaInfo | None = None,
-) -> AsyncIterator[WritableFile]:
+) -> AsyncGenerator[WritableFile]:
     server_url = server_url.rstrip("/")
 
     if size is not None and size == 0:
@@ -141,7 +141,7 @@ async def _upload_empty(
             )
         response.raise_for_status()
         data = await response.json()
-    return node_from_record(node_record_from_dict(data))
+    return node_from_record(node_record_from_dict(cast(NodeRecordDict, data)))
 
 
 async def _upload_stream(
@@ -182,7 +182,7 @@ async def _upload_stream(
             )
         response.raise_for_status()
         result = await response.json()
-    return node_from_record(node_record_from_dict(result))
+    return node_from_record(node_record_from_dict(cast(NodeRecordDict, result)))
 
 
 async def _initiate_session(
@@ -369,7 +369,7 @@ class _ResumableWritableFile(WritableFile):
                 )
             response.raise_for_status()
             data = await response.json()
-        return node_from_record(node_record_from_dict(data))
+        return node_from_record(node_record_from_dict(cast(NodeRecordDict, data)))
 
 
 class _EmptyWritableFile(WritableFile):

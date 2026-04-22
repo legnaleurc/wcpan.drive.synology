@@ -40,7 +40,7 @@ async def metadata_worker(
         try:
             await process_item(item)
         except Exception:
-            _L.exception("metadata item failed: %s", item.record.node_id)
+            _L.exception("metadata item failed: %s", item.record.id)
         finally:
             metadata_queue.task_done()
 

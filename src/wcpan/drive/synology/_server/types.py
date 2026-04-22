@@ -4,9 +4,10 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any, NewType, Required, TypedDict
+from typing import NewType, Self
 
-from ..types import NodeRecord
+from ..types import MirrorMutableId, MirrorStableId, NodeRecord
+from .api.types import SynologyWebhookEvent
 
 
 # ---------------------------------------------------------------------------
@@ -19,11 +20,58 @@ SynologyPath = NewType("SynologyPath", PurePosixPath)
 VirtualPath = NewType("VirtualPath", PurePosixPath)
 """Client-facing virtual path, e.g. /photos/2024."""
 
-SynologyIdRef = NewType("SynologyIdRef", str)
-"""Synology API id-reference, e.g. id:12345."""
 
-type SynologyApiRef = SynologyPath | SynologyIdRef
-"""Either a SynologyPath or a SynologyIdRef — both accepted by the Synology API."""
+@dataclass(frozen=True, slots=True)
+class SynologyPermanentLink:
+    permanent_link: str
+
+    def __str__(self) -> str:
+        return f"link:{self.permanent_link}"
+
+    def to_mirror_stable_id(self) -> MirrorStableId:
+        return MirrorStableId(self.permanent_link)
+
+    @classmethod
+    def from_mirror_stable_id(cls, node_id: MirrorStableId) -> Self:
+        return cls(permanent_link=str(node_id))
+
+
+@dataclass(frozen=True, slots=True)
+class SynologyFileId:
+    file_id: str
+
+    def __str__(self) -> str:
+        return f"id:{self.file_id}"
+
+    def to_mirror_mutable_id(self) -> MirrorMutableId:
+        return MirrorMutableId(self.file_id)
+
+    @classmethod
+    def from_mirror_mutable_id(cls, file_id: MirrorMutableId) -> Self:
+        return cls(file_id=str(file_id))
+
+
+type SynologyNodeRef = SynologyPermanentLink | SynologyFileId
+"""Stable node ref for object operations, preferring permanent link where possible."""
+
+type SynologyParentRef = SynologyPath | SynologyFileId
+"""Parent target for create/upload operations."""
+
+
+@dataclass(frozen=True, slots=True)
+class SynologyChildRef:
+    parent_ref: SynologyParentRef
+    name: str
+
+    def __str__(self) -> str:
+        return f"{self.parent_ref}/{self.name}"
+
+
+type SynologyLookupRef = SynologyNodeRef | SynologyChildRef
+"""Lookup target for fetching one node by direct ref or parent/name composition."""
+
+type SynologyFolderRef = SynologyLookupRef | SynologyPath
+"""Folder locator accepted by list operations."""
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +79,7 @@ type SynologyApiRef = SynologyPath | SynologyIdRef
 # ---------------------------------------------------------------------------
 
 type WriteQueue = asyncio.Queue[Callable[[], Awaitable[None]]]
-type WebhookQueue = asyncio.Queue[Any]
+type WebhookQueue = asyncio.Queue[SynologyWebhookEvent]
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,28 +91,6 @@ class MetadataWorkItem:
 
 
 type MetadataQueue = asyncio.Queue[MetadataWorkItem]
-
-
-# ---------------------------------------------------------------------------
-# Server configuration
-# ---------------------------------------------------------------------------
-
-
-class RawServerConfig(TypedDict, total=False):
-    version: Required[int]
-    database_url: Required[str]
-    synology_url: Required[str]
-    username: Required[str]
-    password: Required[str]
-    mounts: Required[dict[str, str]]
-    public_url: Required[str]
-    host: str
-    port: int
-    local_paths: Required[dict[str, str]]
-    webhook_app_id: str
-    otp_code: str | None
-    log_path: str | None
-    upload_tmp_dir: str | None
 
 
 @dataclass(frozen=True, kw_only=True)

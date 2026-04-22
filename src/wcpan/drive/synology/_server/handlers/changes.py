@@ -45,7 +45,7 @@ async def get_changes(request: web.Request) -> web.Response:
     changes: list[dict[str, Any]] = []
     for node_id, is_removed, record in rows:
         if is_removed:
-            changes.append({"removed": True, "node_id": node_id})
+            changes.append({"removed": True, "node_id": str(node_id)})
         elif record is not None:
             changes.append({"removed": False, "node": record_to_response(record)})
 

@@ -31,7 +31,7 @@ from wcpan.drive.synology._server.workers import (
     metadata_worker,
     write_worker,
 )
-from wcpan.drive.synology.types import NodeRecord
+from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
 _TS = int(datetime(2024, 1, 1, tzinfo=UTC).timestamp())
@@ -40,7 +40,7 @@ _TS = int(datetime(2024, 1, 1, tzinfo=UTC).timestamp())
 async def _reconcile_with_worker(
     storage: StorageService,
     mounts: dict[str, str],
-    network: object,
+    drive_api: object,
     root_id: str,
     *,
     dry_run: bool,
@@ -49,12 +49,22 @@ async def _reconcile_with_worker(
     q = create_write_queue()
     mq = create_metadata_queue()
     with ThreadPoolExecutor(2) as pool:
-        off_main = OffMainThreadService(pool)
-        cs = NodeSyncService(storage, q, off_main, mounts, {}, metadata_queue=mq)
+        off_main = OffMainThreadService(pool=pool)
+        cs = NodeSyncService(
+            storage=storage,
+            write_queue=q,
+            off_main=off_main,
+            mounts=mounts,
+            local_paths={},
+            metadata_queue=mq,
+        )
         syno_mounts = {k: SynologyPath(PurePosixPath(v)) for k, v in mounts.items()}
-        syno_paths = SynologyPathService(MountRegistry(syno_mounts, {}))
+        syno_paths = SynologyPathService(
+            registry=MountRegistry(mounts=syno_mounts, root_ids={}),
+            storage=storage,
+        )
         bf = BackfillService(
-            network=network,
+            drive_api=drive_api,
             storage=storage,
             syno_paths=syno_paths,
             node_sync=cs,
@@ -91,7 +101,7 @@ def _node(
 ) -> NodeRecord:
     t = datetime(2024, 1, 1, tzinfo=UTC)
     return NodeRecord(
-        node_id=node_id,
+        id=node_id,
         parent_id=parent_id,
         name=name,
         is_directory=is_directory,
@@ -105,6 +115,7 @@ def _node(
         width=width,
         height=0,
         ms_duration=0,
+        mutable_id=MirrorMutableId(node_id),
     )
 
 
@@ -119,6 +130,7 @@ def _syno_item(
 ) -> dict:
     return {
         "file_id": file_id,
+        "permanent_link": file_id,
         "parent_id": "",
         "name": name,
         "type": "dir" if is_dir else "file",
@@ -135,7 +147,9 @@ class TestVirtualPathToDirectoryNodeId(IsolatedAsyncioTestCase):
         fd, self.db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         self.pool = ThreadPoolExecutor()
-        storage = StorageService(self.db_path, OffMainThreadService(self.pool))
+        storage = StorageService(
+            self.db_path, off_main=OffMainThreadService(pool=self.pool)
+        )
         await storage.ensure_schema()
         await storage.bulk_upsert_nodes(
             [
@@ -144,7 +158,7 @@ class TestVirtualPathToDirectoryNodeId(IsolatedAsyncioTestCase):
                 _node("dir-1", "Projects", mount_id("docs"), is_directory=True),
             ]
         )
-        self.svc = VirtualPathService(storage)
+        self.svc = VirtualPathService(storage=storage)
 
     async def asyncTearDown(self) -> None:
         self.pool.shutdown(wait=False, cancel_futures=True)
@@ -189,7 +203,9 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(db_path, OffMainThreadService(pool))
+                storage = StorageService(
+                    db_path, off_main=OffMainThreadService(pool=pool)
+                )
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -202,7 +218,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
                     ]
                 )
                 mounts = {"docs": "/volume1/docs"}
-                network = MagicMock()
+                drive_api = MagicMock()
 
                 async def _list_children(_nw: object, parent_id: str) -> list[dict]:
                     if parent_id == "dir-1":
@@ -212,7 +228,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
                 stats = await _reconcile_with_worker(
                     storage,
                     mounts,
-                    network,
+                    drive_api,
                     "dir-1",
                     dry_run=False,
                     list_children_side_effect=_list_children,
@@ -233,7 +249,9 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(db_path, OffMainThreadService(pool))
+                storage = StorageService(
+                    db_path, off_main=OffMainThreadService(pool=pool)
+                )
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -246,7 +264,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
                     ]
                 )
                 mounts = {"docs": "/volume1/docs"}
-                network = MagicMock()
+                drive_api = MagicMock()
 
                 async def _list_children(_nw: object, parent_id: str) -> list[dict]:
                     if parent_id == "dir-1":
@@ -256,7 +274,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
                 stats = await _reconcile_with_worker(
                     storage,
                     mounts,
-                    network,
+                    drive_api,
                     "dir-1",
                     dry_run=True,
                     list_children_side_effect=_list_children,
@@ -274,7 +292,9 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(db_path, OffMainThreadService(pool))
+                storage = StorageService(
+                    db_path, off_main=OffMainThreadService(pool=pool)
+                )
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -318,7 +338,9 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(db_path, OffMainThreadService(pool))
+                storage = StorageService(
+                    db_path, off_main=OffMainThreadService(pool=pool)
+                )
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -358,7 +380,9 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(db_path, OffMainThreadService(pool))
+                storage = StorageService(
+                    db_path, off_main=OffMainThreadService(pool=pool)
+                )
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -396,7 +420,9 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(db_path, OffMainThreadService(pool))
+                storage = StorageService(
+                    db_path, off_main=OffMainThreadService(pool=pool)
+                )
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -438,7 +464,9 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(db_path, OffMainThreadService(pool))
+                storage = StorageService(
+                    db_path, off_main=OffMainThreadService(pool=pool)
+                )
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [

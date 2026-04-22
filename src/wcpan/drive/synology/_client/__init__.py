@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from aiohttp import ClientSession
@@ -8,7 +8,7 @@ from .service import ClientFileService
 
 
 @asynccontextmanager
-async def create_service(*, server_url: str) -> AsyncIterator[FileService]:
+async def create_service(*, server_url: str) -> AsyncGenerator[FileService]:
     """Create a FileService that talks to a wcpan.drive.synology server."""
     async with ClientSession() as session:
-        yield ClientFileService(session, server_url)
+        yield ClientFileService(session=session, server_url=server_url)

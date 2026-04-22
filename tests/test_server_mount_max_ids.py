@@ -18,7 +18,9 @@ class TestGetMountMaxIds(IsolatedAsyncioTestCase):
         fd, self.db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         self.pool = ThreadPoolExecutor()
-        self.storage = StorageService(self.db_path, OffMainThreadService(self.pool))
+        self.storage = StorageService(
+            self.db_path, off_main=OffMainThreadService(pool=self.pool)
+        )
         await self.storage.ensure_schema()
 
     async def asyncTearDown(self) -> None:
@@ -66,7 +68,9 @@ class TestSetMountState(IsolatedAsyncioTestCase):
         fd, self.db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         self.pool = ThreadPoolExecutor()
-        self.storage = StorageService(self.db_path, OffMainThreadService(self.pool))
+        self.storage = StorageService(
+            self.db_path, off_main=OffMainThreadService(pool=self.pool)
+        )
         await self.storage.ensure_schema()
 
     async def asyncTearDown(self) -> None:
@@ -110,23 +114,23 @@ class TestEnsureSchemaVersion(IsolatedAsyncioTestCase):
         fd, self.db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         self.pool = ThreadPoolExecutor()
-        self.off_main = OffMainThreadService(self.pool)
+        self.off_main = OffMainThreadService(pool=self.pool)
 
     async def asyncTearDown(self) -> None:
         self.pool.shutdown(wait=False, cancel_futures=True)
         os.unlink(self.db_path)
 
     async def test_new_db_sets_user_version(self) -> None:
-        await StorageService(self.db_path, self.off_main).ensure_schema()
+        await StorageService(self.db_path, off_main=self.off_main).ensure_schema()
 
         con = sqlite3.connect(self.db_path)
         version = con.execute("PRAGMA user_version").fetchone()[0]
         con.close()
 
-        self.assertEqual(version, 1)
+        self.assertEqual(version, 2)
 
     async def test_existing_db_with_matching_version_is_accepted(self) -> None:
-        storage = StorageService(self.db_path, self.off_main)
+        storage = StorageService(self.db_path, off_main=self.off_main)
         await storage.ensure_schema()
         await storage.ensure_schema()
 
@@ -137,7 +141,7 @@ class TestEnsureSchemaVersion(IsolatedAsyncioTestCase):
         con.close()
 
         with self.assertRaises(SchemaVersionError):
-            await StorageService(self.db_path, self.off_main).ensure_schema()
+            await StorageService(self.db_path, off_main=self.off_main).ensure_schema()
 
     async def test_existing_db_with_wrong_version_is_rejected(self) -> None:
         con = sqlite3.connect(self.db_path)
@@ -146,4 +150,4 @@ class TestEnsureSchemaVersion(IsolatedAsyncioTestCase):
         con.close()
 
         with self.assertRaises(SchemaVersionError):
-            await StorageService(self.db_path, self.off_main).ensure_schema()
+            await StorageService(self.db_path, off_main=self.off_main).ensure_schema()

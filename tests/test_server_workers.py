@@ -12,7 +12,7 @@ from wcpan.drive.synology._server.workers import (
     metadata_worker,
     write_worker,
 )
-from wcpan.drive.synology.types import NodeRecord
+from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
 logging.getLogger("wcpan.drive.synology._server").setLevel(logging.CRITICAL + 1)
@@ -23,7 +23,7 @@ _EPOCH = datetime.fromtimestamp(0, UTC)
 
 def _make_record(node_id: str = "n1") -> NodeRecord:
     return NodeRecord(
-        node_id=node_id,
+        id=node_id,
         parent_id="p1",
         name="x",
         is_directory=False,
@@ -37,6 +37,7 @@ def _make_record(node_id: str = "n1") -> NodeRecord:
         width=0,
         height=0,
         ms_duration=0,
+        mutable_id=MirrorMutableId(node_id),
     )
 
 
@@ -92,7 +93,7 @@ class TestMetadataWorker(IsolatedAsyncioTestCase):
         processed: list[str] = []
 
         async def process(item: MetadataWorkItem) -> None:
-            processed.append(item.record.node_id)
+            processed.append(item.record.id)
 
         item = MetadataWorkItem(record=_make_record("n1"), force_refresh=False)
         await q.put(item)

@@ -1,4 +1,4 @@
-"""Tests for webhook processing: path extraction, fetch-and-enrich, item dispatch, batch processing."""
+"""Tests for webhook processing: classification, execution, and batch flow."""
 
 import asyncio
 import logging
@@ -8,12 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from wcpan.drive.synology._server.lib.mounts import MountRegistry
 from wcpan.drive.synology._server.services.sync import NodeSyncService
-from wcpan.drive.synology._server.services.webhook import (
-    _delayed_file_upsert,
-    _fetch_and_enrich,
-    _process_webhook_item,
+from wcpan.drive.synology._server.services.webhook import WebhookService
+from wcpan.drive.synology._server.types import (
+    SynologyFileId,
+    SynologyPermanentLink,
 )
-from wcpan.drive.synology.types import NodeRecord
+from wcpan.drive.synology.types import MirrorMutableId, MirrorStableId, NodeRecord
 
 
 logging.getLogger("wcpan.drive.synology._server").setLevel(logging.CRITICAL + 1)
@@ -23,6 +23,7 @@ _EPOCH = datetime.fromtimestamp(0, UTC)
 
 _FAKE_SYNO_INFO = {
     "file_id": "f1",
+    "permanent_link": "f1",
     "parent_id": "p1",
     "name": "test.txt",
     "type": "file",
@@ -34,9 +35,12 @@ _FAKE_SYNO_INFO = {
 }
 
 
-def _make_node(node_id: str = "f1", parent_id: str = "p1") -> NodeRecord:
+def _make_node(
+    node_id: MirrorStableId = MirrorStableId("f1"),
+    parent_id: MirrorStableId = MirrorStableId("p1"),
+) -> NodeRecord:
     return NodeRecord(
-        node_id=node_id,
+        id=node_id,
         parent_id=parent_id,
         name="test.txt",
         is_directory=False,
@@ -50,6 +54,25 @@ def _make_node(node_id: str = "f1", parent_id: str = "p1") -> NodeRecord:
         width=0,
         height=0,
         ms_duration=0,
+        mutable_id=MirrorMutableId(str(node_id)),
+    )
+
+
+def _make_service(
+    drive_api: object | None = None,
+    storage: object | None = None,
+    node_sync: object | None = None,
+    syno_paths: object | None = None,
+    write_queue: asyncio.Queue | None = None,
+    mount_registry: MountRegistry | None = None,
+) -> WebhookService:
+    return WebhookService(
+        drive_api=drive_api or MagicMock(),
+        storage=storage or MagicMock(),
+        node_sync=node_sync or MagicMock(spec=NodeSyncService),
+        syno_paths=syno_paths or MagicMock(),
+        write_queue=write_queue or asyncio.Queue(),
+        mount_registry=mount_registry or MountRegistry(mounts={}, root_ids={}),
     )
 
 
@@ -62,249 +85,316 @@ class TestFetchAndEnrich(IsolatedAsyncioTestCase):
     async def test_success(self):
         network = MagicMock()
         storage = MagicMock()
-        storage.get_node_by_id = AsyncMock(return_value=_make_node("p1"))
+        storage.get_node_by_mutable_id = AsyncMock(return_value=_make_node("p1"))
         node_sync = MagicMock(spec=NodeSyncService)
         node_sync.upsert = AsyncMock(return_value=_make_node())
+        network.get_node_metadata = AsyncMock(return_value=_FAKE_SYNO_INFO)
+        service = _make_service(network, storage, node_sync)
 
-        with patch(
-            "wcpan.drive.synology._server.services.webhook.synology_files.get_file_metadata_by_id",
-            new_callable=AsyncMock,
-            return_value=_FAKE_SYNO_INFO,
-        ):
-            ok = await _fetch_and_enrich(
-                network,
-                storage,
-                node_sync,
-                "f1",
-                "p1",
-                "file_created",
-                MountRegistry({}, {}),
-            )
-        self.assertTrue(ok)
+        await service._fetch_and_enrich(
+            SynologyFileId(file_id="f1"),
+            SynologyPermanentLink(permanent_link="f1"),
+            SynologyFileId(file_id="p1"),
+            "file_created",
+        )
         node_sync.upsert.assert_awaited_once()
 
-    async def test_no_parent_id_returns_true(self):
-        ok = await _fetch_and_enrich(
-            MagicMock(),
-            MagicMock(),
-            MagicMock(),
-            "f1",
-            "",
+    async def test_no_parent_id_skips(self):
+        service = _make_service()
+        await service._fetch_and_enrich(
+            SynologyFileId(file_id="f1"),
+            SynologyPermanentLink(permanent_link="f1"),
+            None,
             "file_created",
-            MountRegistry({}, {}),
         )
-        self.assertTrue(ok)
 
-    async def test_parent_not_in_db_not_mount_returns_true(self):
+    async def test_parent_not_in_db_not_mount_skips(self):
         storage = MagicMock()
-        storage.get_node_by_id = AsyncMock(return_value=None)
-        ok = await _fetch_and_enrich(
-            MagicMock(),
-            storage,
-            MagicMock(),
-            "f1",
-            "unknown-parent",
+        storage.get_node_by_mutable_id = AsyncMock(return_value=None)
+        service = _make_service(storage=storage)
+        await service._fetch_and_enrich(
+            SynologyFileId(file_id="f1"),
+            SynologyPermanentLink(permanent_link="f1"),
+            SynologyFileId(file_id="unknown-parent"),
             "file_created",
-            MountRegistry({}, {}),
         )
-        self.assertTrue(ok)
 
     async def test_parent_resolved_via_mount(self):
         storage = MagicMock()
-        storage.get_node_by_id = AsyncMock(return_value=None)
+        storage.get_node_by_mutable_id = AsyncMock(return_value=None)
         node_sync = MagicMock(spec=NodeSyncService)
         node_sync.upsert = AsyncMock(return_value=_make_node())
-        registry = MountRegistry({}, {"real-parent": "_docs"})
+        registry = MountRegistry(
+            mounts={},
+            root_ids={
+                SynologyFileId(file_id="real-parent"): MirrorStableId("_docs"),
+            },
+        )
+        network = MagicMock()
+        network.get_node_metadata = AsyncMock(return_value=_FAKE_SYNO_INFO)
+        service = _make_service(network, storage, node_sync, mount_registry=registry)
 
-        with patch(
-            "wcpan.drive.synology._server.services.webhook.synology_files.get_file_metadata_by_id",
-            new_callable=AsyncMock,
-            return_value=_FAKE_SYNO_INFO,
-        ):
-            ok = await _fetch_and_enrich(
-                MagicMock(),
-                storage,
-                node_sync,
-                "f1",
-                "real-parent",
-                "file_created",
-                registry,
-            )
-        self.assertTrue(ok)
+        await service._fetch_and_enrich(
+            SynologyFileId(file_id="f1"),
+            SynologyPermanentLink(permanent_link="f1"),
+            SynologyFileId(file_id="real-parent"),
+            "file_created",
+        )
         # parent_id should have been resolved to _docs
         call_args = node_sync.upsert.call_args[0][0]
         self.assertEqual(call_args.parent_id, "_docs")
 
-    async def test_metadata_not_found_returns_false(self):
+    async def test_metadata_not_found_skips(self):
         storage = MagicMock()
-        storage.get_node_by_id = AsyncMock(return_value=_make_node("p1"))
+        storage.get_node_by_mutable_id = AsyncMock(return_value=_make_node("p1"))
+        network = MagicMock()
+        network.get_node_metadata = AsyncMock(return_value=None)
+        service = _make_service(network, storage)
 
-        with patch(
-            "wcpan.drive.synology._server.services.webhook.synology_files.get_file_metadata_by_id",
-            new_callable=AsyncMock,
-            return_value=None,
-        ):
-            ok = await _fetch_and_enrich(
-                MagicMock(),
-                storage,
-                MagicMock(),
-                "f1",
-                "p1",
-                "file_created",
-                MountRegistry({}, {}),
-            )
-        self.assertFalse(ok)
+        await service._fetch_and_enrich(
+            SynologyFileId(file_id="f1"),
+            SynologyPermanentLink(permanent_link="f1"),
+            SynologyFileId(file_id="p1"),
+            "file_created",
+        )
 
 
 # ---------------------------------------------------------------------------
-# _process_webhook_item
+# _classify_webhook_item
 # ---------------------------------------------------------------------------
 
 
-class TestProcessWebhookItem(IsolatedAsyncioTestCase):
-    def _deps(self):
+class TestClassifyWebhookItem(IsolatedAsyncioTestCase):
+    def _service(self):
         network = MagicMock()
         storage = MagicMock()
-        storage.get_node_by_id = AsyncMock(return_value=_make_node("p1"))
+        storage.get_node_by_mutable_id = AsyncMock(return_value=_make_node("p1"))
         node_sync = MagicMock(spec=NodeSyncService)
         node_sync.upsert = AsyncMock(return_value=_make_node())
-        registry = MountRegistry({}, {})
-        return network, storage, node_sync, registry
+        network.get_node_metadata = AsyncMock(return_value=_FAKE_SYNO_INFO)
+        registry = MountRegistry(mounts={}, root_ids={})
+        return _make_service(network, storage, node_sync, mount_registry=registry)
 
-    async def test_empty_file_id_returns_noop(self):
-        n, s, cs, mr = self._deps()
-        delete_id, needs = await _process_webhook_item(
-            {"event_type": "file_created", "file_id": ""},
-            n,
-            s,
-            cs,
-            mr,
-        )
-        self.assertIsNone(delete_id)
-        self.assertFalse(needs)
-
-    async def test_file_removed_returns_delete_id(self):
-        n, s, cs, mr = self._deps()
-        delete_id, needs = await _process_webhook_item(
-            {"event_type": "file_removed", "file_id": "f1"},
-            n,
-            s,
-            cs,
-            mr,
-        )
-        self.assertEqual(delete_id, "f1")
-        self.assertFalse(needs)
-
-    async def test_file_modified_file_schedules_delayed(self):
-        n, s, cs, mr = self._deps()
-        delete_id, needs = await _process_webhook_item(
-            {"event_type": "file_modified", "file_id": "f1", "file_type": "file"},
-            n,
-            s,
-            cs,
-            mr,
-        )
-        self.assertIsNone(delete_id)
-        self.assertTrue(needs)
-
-    async def test_file_modified_dir_is_noop(self):
-        n, s, cs, mr = self._deps()
-        delete_id, needs = await _process_webhook_item(
-            {"event_type": "file_modified", "file_id": "f1", "file_type": "dir"},
-            n,
-            s,
-            cs,
-            mr,
-        )
-        self.assertIsNone(delete_id)
-        self.assertFalse(needs)
-
-    async def test_file_created_dir_upserts_immediately(self):
-        n, s, cs, mr = self._deps()
-        with patch(
-            "wcpan.drive.synology._server.services.webhook.synology_files.get_file_metadata_by_id",
-            new_callable=AsyncMock,
-            return_value=_FAKE_SYNO_INFO,
-        ):
-            delete_id, needs = await _process_webhook_item(
-                {
-                    "event_type": "file_created",
-                    "file_id": "f1",
-                    "file_type": "dir",
-                    "parent_id": "p1",
-                },
-                n,
-                s,
-                cs,
-                mr,
-            )
-        self.assertIsNone(delete_id)
-        self.assertFalse(needs)
-        cs.upsert.assert_awaited_once()
-
-    async def test_file_moved_upserts_immediately(self):
-        n, s, cs, mr = self._deps()
-        with patch(
-            "wcpan.drive.synology._server.services.webhook.synology_files.get_file_metadata_by_id",
-            new_callable=AsyncMock,
-            return_value=_FAKE_SYNO_INFO,
-        ):
-            delete_id, needs = await _process_webhook_item(
-                {"event_type": "file_moved", "file_id": "f1", "parent_id": "p1"},
-                n,
-                s,
-                cs,
-                mr,
-            )
-        self.assertIsNone(delete_id)
-        self.assertFalse(needs)
-        cs.upsert.assert_awaited_once()
-
-    async def test_file_renamed_upserts_immediately(self):
-        n, s, cs, mr = self._deps()
-        with patch(
-            "wcpan.drive.synology._server.services.webhook.synology_files.get_file_metadata_by_id",
-            new_callable=AsyncMock,
-            return_value=_FAKE_SYNO_INFO,
-        ):
-            delete_id, needs = await _process_webhook_item(
-                {"event_type": "file_renamed", "file_id": "f1", "parent_id": "p1"},
-                n,
-                s,
-                cs,
-                mr,
-            )
-        self.assertIsNone(delete_id)
-        self.assertFalse(needs)
-
-    async def test_file_created_file_schedules_delayed(self):
-        n, s, cs, mr = self._deps()
-        delete_id, needs = await _process_webhook_item(
+    async def test_empty_file_id_schedules_delayed_upsert(self):
+        service = self._service()
+        plan = service._classify_webhook_item(
             {
                 "event_type": "file_created",
-                "file_id": "f1",
+                "file_id": "",
+                "permanent_link": "f1",
                 "file_type": "file",
                 "parent_id": "p1",
             },
-            n,
-            s,
-            cs,
-            mr,
         )
-        self.assertIsNone(delete_id)
-        self.assertTrue(needs)
+        self.assertEqual(plan.schedule_key, "f1")
+        self.assertEqual(plan.file_ref.file_id, "")
+        self.assertTrue(plan.schedule_delayed_upsert)
+
+    async def test_file_removed_returns_delete_id(self):
+        service = self._service()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "file_removed",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "file",
+                "parent_id": "p1",
+            },
+        )
+        self.assertEqual(plan.delete_id, "f1")
+        self.assertFalse(plan.schedule_delayed_upsert)
+
+    async def test_file_modified_file_schedules_delayed(self):
+        service = self._service()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "file_modified",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "file",
+                "parent_id": "p1",
+            },
+        )
+        self.assertTrue(plan.schedule_delayed_upsert)
+        self.assertFalse(plan.fetch_immediately)
+
+    async def test_file_modified_dir_is_noop(self):
+        service = self._service()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "file_modified",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "dir",
+                "parent_id": "p1",
+            },
+        )
+        self.assertIsNone(plan.delete_id)
+        self.assertFalse(plan.fetch_immediately)
+        self.assertFalse(plan.schedule_delayed_upsert)
+
+    async def test_file_created_dir_fetches_and_waits(self):
+        service = self._service()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "file_created",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "dir",
+                "parent_id": "p1",
+            },
+        )
+        self.assertTrue(plan.fetch_immediately)
+        self.assertTrue(plan.wait_for_writes)
+        self.assertFalse(plan.scan_moved_dir_subtree)
+
+    async def test_file_moved_dir_fetches_waits_and_scans(self):
+        service = self._service()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "file_moved",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "dir",
+                "parent_id": "p1",
+            },
+        )
+        self.assertTrue(plan.fetch_immediately)
+        self.assertTrue(plan.wait_for_writes)
+        self.assertTrue(plan.scan_moved_dir_subtree)
+
+    async def test_file_renamed_fetches_immediately(self):
+        service = self._service()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "file_renamed",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "file",
+                "parent_id": "p1",
+            },
+        )
+        self.assertTrue(plan.fetch_immediately)
+        self.assertFalse(plan.wait_for_writes)
+        self.assertFalse(plan.scan_moved_dir_subtree)
+
+    async def test_file_created_file_schedules_delayed(self):
+        service = self._service()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "file_created",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "file",
+                "parent_id": "p1",
+            },
+        )
+        self.assertIsNone(plan.delete_id)
+        self.assertTrue(plan.schedule_delayed_upsert)
 
     async def test_unknown_event_type_is_noop(self):
-        n, s, cs, mr = self._deps()
-        delete_id, needs = await _process_webhook_item(
-            {"event_type": "something_else", "file_id": "f1"},
-            n,
-            s,
-            cs,
-            mr,
+        service = self._service()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "something_else",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "file",
+                "parent_id": "p1",
+            },
         )
-        self.assertIsNone(delete_id)
-        self.assertFalse(needs)
+        self.assertIsNone(plan.delete_id)
+        self.assertFalse(plan.fetch_immediately)
+        self.assertFalse(plan.schedule_delayed_upsert)
+
+
+# ---------------------------------------------------------------------------
+# _execute_webhook_plan
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteWebhookPlan(IsolatedAsyncioTestCase):
+    async def test_fetches_then_waits_for_created_dir(self):
+        service = _make_service()
+        pending = MagicMock()
+        service._write_queue.join = AsyncMock()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "file_created",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "dir",
+                "parent_id": "p1",
+            },
+        )
+
+        with patch.object(
+            service,
+            "_fetch_and_enrich",
+            new_callable=AsyncMock,
+        ) as mock_fetch:
+            await service._execute_webhook_plan(plan, pending=pending)
+
+        mock_fetch.assert_awaited_once_with(
+            plan.file_ref,
+            plan.permanent_link_ref,
+            plan.parent_file_ref,
+            plan.event_type,
+        )
+        service._write_queue.join.assert_awaited_once()
+        pending.schedule.assert_not_called()
+
+    async def test_deletes_when_plan_requests_removal(self):
+        node_sync = MagicMock(spec=NodeSyncService)
+        node_sync.delete = AsyncMock()
+        service = _make_service(node_sync=node_sync)
+        pending = MagicMock()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "file_removed",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "file",
+                "parent_id": "p1",
+            },
+        )
+
+        await service._execute_webhook_plan(plan, pending=pending)
+
+        node_sync.delete.assert_awaited_once_with("f1")
+        pending.schedule.assert_not_called()
+
+    async def test_schedules_delayed_upsert(self):
+        service = _make_service()
+        pending = MagicMock()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "file_modified",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "file",
+                "parent_id": "p1",
+            },
+        )
+
+        async def _scheduled():
+            return None
+
+        mock_delayed = MagicMock(side_effect=lambda *args: _scheduled())
+
+        with patch.object(service, "_delayed_file_upsert", new=mock_delayed):
+            await service._execute_webhook_plan(plan, pending=pending)
+
+        mock_delayed.assert_called_once_with(
+            plan.file_ref,
+            plan.permanent_link_ref,
+            plan.parent_file_ref,
+            plan.event_type,
+        )
+        pending.schedule.assert_called_once()
+        self.assertEqual(pending.schedule.call_args.args[0], "f1")
+        scheduled_coro = pending.schedule.call_args.args[1]
+        scheduled_coro.close()
 
 
 # ---------------------------------------------------------------------------
@@ -313,74 +403,155 @@ class TestProcessWebhookItem(IsolatedAsyncioTestCase):
 
 
 class TestDelayedFileUpsert(IsolatedAsyncioTestCase):
-    async def test_succeeds_on_first_retry(self):
+    async def test_sleeps_once_then_fetches(self):
+        service = _make_service()
         with (
-            patch(
-                "wcpan.drive.synology._server.services.webhook._fetch_and_enrich",
+            patch.object(
+                service,
+                "_fetch_and_enrich",
                 new_callable=AsyncMock,
-                return_value=True,
             ) as mock_fetch,
             patch(
                 "wcpan.drive.synology._server.services.webhook.asyncio.sleep",
                 new_callable=AsyncMock,
             ) as mock_sleep,
         ):
-            await _delayed_file_upsert(
-                "f1",
-                "p1",
+            await service._delayed_file_upsert(
+                SynologyFileId(file_id="f1"),
+                SynologyPermanentLink(permanent_link="f1"),
+                SynologyFileId(file_id="p1"),
                 "file_created",
-                MagicMock(),
-                MagicMock(),
-                MagicMock(),
-                MountRegistry({}, {}),
             )
-        # Only one sleep (first retry delay)
         mock_sleep.assert_awaited_once()
         mock_fetch.assert_awaited_once()
 
-    async def test_retries_then_succeeds(self):
-        with (
-            patch(
-                "wcpan.drive.synology._server.services.webhook._fetch_and_enrich",
-                new_callable=AsyncMock,
-                side_effect=[False, False, True],
-            ) as mock_fetch,
-            patch(
-                "wcpan.drive.synology._server.services.webhook.asyncio.sleep",
-                new_callable=AsyncMock,
-            ) as mock_sleep,
-        ):
-            await _delayed_file_upsert(
-                "f1",
-                "p1",
-                "file_created",
-                MagicMock(),
-                MagicMock(),
-                MagicMock(),
-                MountRegistry({}, {}),
-            )
-        self.assertEqual(mock_fetch.await_count, 3)
-        self.assertEqual(mock_sleep.await_count, 3)
 
-    async def test_exhausts_all_retries(self):
-        with (
-            patch(
-                "wcpan.drive.synology._server.services.webhook._fetch_and_enrich",
-                new_callable=AsyncMock,
-                return_value=False,
-            ) as mock_fetch,
-            patch(
-                "wcpan.drive.synology._server.services.webhook.asyncio.sleep",
-                new_callable=AsyncMock,
-            ),
-        ):
-            await _delayed_file_upsert(
-                "f1",
-                "p1",
-                "file_created",
-                MagicMock(),
-                MagicMock(),
-                MagicMock(),
-                MountRegistry({}, {}),
-            )
-        self.assertEqual(mock_fetch.await_count, 3)
+# ---------------------------------------------------------------------------
+# _resolve_moved_dir_root_id
+# ---------------------------------------------------------------------------
+
+
+class TestResolveMovedDirRootId(IsolatedAsyncioTestCase):
+    async def test_uses_permanent_link_record(self):
+        storage = MagicMock()
+        storage.get_node_by_id = AsyncMock(return_value=_make_node("perm-1"))
+        storage.get_node_by_mutable_id = AsyncMock(return_value=None)
+        drive_api = MagicMock()
+        service = _make_service(drive_api, storage)
+
+        rv = await service._resolve_moved_dir_root_id(
+            SynologyFileId(file_id="f1"),
+            SynologyPermanentLink(permanent_link="perm-1"),
+        )
+
+        self.assertEqual(rv, "perm-1")
+        drive_api.get_node_metadata.assert_not_called()
+        storage.get_node_by_mutable_id.assert_not_awaited()
+
+    async def test_falls_back_to_metadata_permanent_link(self):
+        storage = MagicMock()
+        storage.get_node_by_id = AsyncMock(return_value=None)
+        storage.get_node_by_mutable_id = AsyncMock(return_value=None)
+        drive_api = MagicMock()
+        drive_api.get_node_metadata = AsyncMock(
+            return_value={**_FAKE_SYNO_INFO, "permanent_link": "perm-2"}
+        )
+        service = _make_service(drive_api, storage)
+
+        rv = await service._resolve_moved_dir_root_id(
+            SynologyFileId(file_id="f1"),
+            SynologyPermanentLink(permanent_link="perm-1"),
+        )
+
+        self.assertEqual(rv, "perm-2")
+        storage.get_node_by_mutable_id.assert_not_awaited()
+
+    async def test_falls_back_to_storage_lookup_by_file_id(self):
+        storage = MagicMock()
+        storage.get_node_by_id = AsyncMock(return_value=None)
+        storage.get_node_by_mutable_id = AsyncMock(return_value=_make_node("mirror-1"))
+        drive_api = MagicMock()
+        drive_api.get_node_metadata = AsyncMock(return_value=None)
+        service = _make_service(drive_api, storage)
+
+        rv = await service._resolve_moved_dir_root_id(
+            SynologyFileId(file_id="f1"),
+            SynologyPermanentLink(permanent_link="perm-1"),
+        )
+
+        self.assertEqual(rv, "mirror-1")
+        storage.get_node_by_mutable_id.assert_awaited_once_with(MirrorMutableId("f1"))
+
+    async def test_returns_none_when_unresolved(self):
+        storage = MagicMock()
+        storage.get_node_by_id = AsyncMock(return_value=None)
+        storage.get_node_by_mutable_id = AsyncMock(return_value=None)
+        drive_api = MagicMock()
+        drive_api.get_node_metadata = AsyncMock(return_value=None)
+        service = _make_service(drive_api, storage)
+
+        rv = await service._resolve_moved_dir_root_id(
+            SynologyFileId(file_id="f1"),
+            SynologyPermanentLink(permanent_link="perm-1"),
+        )
+
+        self.assertIsNone(rv)
+
+
+class TestWebhookServiceMovedDir(IsolatedAsyncioTestCase):
+    async def test_skips_subtree_scan_when_root_unresolved(self):
+        drive_api = MagicMock()
+        storage = MagicMock()
+
+        async def _get_by_mutable_id(mutable_id: MirrorMutableId):
+            if mutable_id == MirrorMutableId("p1"):
+                return _make_node("p1")
+            return None
+
+        storage.get_node_by_mutable_id = AsyncMock(side_effect=_get_by_mutable_id)
+        storage.get_node_by_id = AsyncMock(return_value=None)
+        node_sync = MagicMock(spec=NodeSyncService)
+        node_sync.upsert = AsyncMock(return_value=_make_node())
+        node_sync.delete = AsyncMock()
+        syno_paths = MagicMock()
+        write_queue = asyncio.Queue()
+        mount_registry = MountRegistry(mounts={}, root_ids={})
+        service = WebhookService(
+            drive_api=drive_api,
+            storage=storage,
+            node_sync=node_sync,
+            syno_paths=syno_paths,
+            write_queue=write_queue,
+            mount_registry=mount_registry,
+        )
+        queue = asyncio.Queue()
+        await queue.put(
+            {
+                "event_type": "file_moved",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "dir",
+                "parent_id": "p1",
+            }
+        )
+        scan_done_event = asyncio.Event()
+        scan_done_event.set()
+
+        drive_api.get_node_metadata = AsyncMock(return_value=None)
+
+        with patch.object(
+            service,
+            "_scan_moved_dir_subtree",
+            new_callable=AsyncMock,
+        ) as mock_scan:
+
+            async def _run_once():
+                async with asyncio.TaskGroup() as group:
+                    group.create_task(service.run(queue, group, scan_done_event))
+                    await queue.join()
+                    raise asyncio.CancelledError()
+
+            with self.assertRaises(asyncio.CancelledError):
+                await _run_once()
+
+        mock_scan.assert_not_awaited()

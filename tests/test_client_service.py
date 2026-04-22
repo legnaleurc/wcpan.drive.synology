@@ -85,7 +85,8 @@ class TestCreateDirectory409(IsolatedAsyncioTestCase):
     def _node_body(self) -> dict:
         t = datetime.now(UTC).isoformat()
         return {
-            "node_id": "existing-dir",
+            "id": "existing-dir",
+            "mutable_id": "existing-dir",
             "parent_id": "p",
             "name": "d",
             "is_directory": True,
@@ -108,7 +109,7 @@ class TestCreateDirectory409(IsolatedAsyncioTestCase):
             def post(self, *a, **k):
                 return _Fake409Response(409, body)
 
-        svc = ClientFileService(_Sess(), "http://srv")  # type: ignore[arg-type]
+        svc = ClientFileService(session=_Sess(), server_url="http://srv")  # type: ignore[arg-type]
         node = await svc.create_directory(
             "d", _parent_node(), exist_ok=True, private=None
         )
@@ -121,7 +122,7 @@ class TestCreateDirectory409(IsolatedAsyncioTestCase):
             def post(self, *a, **k):
                 return _Fake409Response(409, body)
 
-        svc = ClientFileService(_Sess2(), "http://srv")  # type: ignore[arg-type]
+        svc = ClientFileService(session=_Sess2(), server_url="http://srv")  # type: ignore[arg-type]
         with self.assertRaises(NodeExistsError) as ctx:
             await svc.create_directory(
                 "d", _parent_node(), exist_ok=False, private=None
@@ -133,7 +134,7 @@ class TestCreateDirectory409(IsolatedAsyncioTestCase):
             def post(self, *a, **k):
                 return _Fake409Response(409, {})
 
-        svc = ClientFileService(_Sess(), "http://srv")  # type: ignore[arg-type]
+        svc = ClientFileService(session=_Sess(), server_url="http://srv")  # type: ignore[arg-type]
         with self.assertRaises(SynologyServerError) as ctx:
             await svc.create_directory("d", _parent_node(), exist_ok=True, private=None)
         self.assertEqual(ctx.exception.status, 409)

@@ -3,21 +3,20 @@
 import functools
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
-from typing import Any
 
 from aiohttp import web
 from wcpan.drive.core.types import MediaInfo
 
-from ..._lib import node_record_to_dict
-from ...types import NodeRecord
+from ..._lib import NodeRecordDict, node_record_to_dict
+from ...types import MirrorStableId, NodeRecord
+from ..api.lib import convert_file_info
 from ..api.types import SynologyFileInfo
 from ..keys import (
     CHANGE_SERVICE_KEY,
-    NETWORK_KEY,
     READY_KEY,
+    SYNOLOGY_DRIVE_API_KEY,
     SYNOLOGY_PATH_KEY,
 )
-from ..lib.nodes import convert_file_info
 from ..services.sync import NodeSyncService
 
 
@@ -36,7 +35,7 @@ def media_info_from_query(q: Mapping[str, str]) -> MediaInfo | None:
     )
 
 
-def record_to_response(record: NodeRecord) -> dict[str, Any]:
+def record_to_response(record: NodeRecord) -> NodeRecordDict:
     return node_record_to_dict(record)
 
 
@@ -55,11 +54,15 @@ def require_ready(
 async def enrich_and_upsert_synology_node(
     *,
     info: SynologyFileInfo,
-    parent_id: str,
+    parent_id: MirrorStableId,
     node_sync: NodeSyncService,
     media_info: MediaInfo | None = None,
 ) -> NodeRecord:
     record = convert_file_info(info, parent_id)
+    if record is None:
+        raise web.HTTPServiceUnavailable(
+            reason="Synology API response missing permanent_link"
+        )
     if media_info is not None:
         record = replace(
             record,
@@ -75,37 +78,16 @@ async def enrich_and_upsert_synology_node(
 async def resolve_name_conflict_and_upsert(
     *,
     request: web.Request,
-    parent_id: str,
+    parent_id: MirrorStableId,
     name: str,
-    prefer_directory: bool | None,
     media_info: MediaInfo | None,
 ) -> NodeRecord:
     """List Synology children and upsert the matching node (409 conflict recovery)."""
     node_sync = request.app[CHANGE_SERVICE_KEY]
-    network = request.app[NETWORK_KEY]
+    drive_api = request.app[SYNOLOGY_DRIVE_API_KEY]
     syno_paths = request.app[SYNOLOGY_PATH_KEY]
 
-    info: SynologyFileInfo | None = None
-    if prefer_directory is True:
-        info = await syno_paths.find_child_by_name(
-            network, parent_id, name, is_directory=True
-        )
-        if info is None:
-            info = await syno_paths.find_child_by_name(
-                network, parent_id, name, is_directory=None
-            )
-    elif prefer_directory is False:
-        info = await syno_paths.find_child_by_name(
-            network, parent_id, name, is_directory=False
-        )
-        if info is None:
-            info = await syno_paths.find_child_by_name(
-                network, parent_id, name, is_directory=None
-            )
-    else:
-        info = await syno_paths.find_child_by_name(
-            network, parent_id, name, is_directory=None
-        )
+    info = await syno_paths.find_child_by_name(drive_api, parent_id, name)
 
     if info is None:
         raise web.HTTPConflict(

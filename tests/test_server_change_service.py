@@ -11,7 +11,7 @@ from wcpan.drive.synology._server.services.sync import (
     _has_complete_media_dims,
 )
 from wcpan.drive.synology._server.types import MetadataWorkItem
-from wcpan.drive.synology.types import NodeRecord
+from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
 _EPOCH = datetime.fromtimestamp(0, UTC)
@@ -28,7 +28,7 @@ def _make_record(
     is_directory: bool = False,
 ) -> NodeRecord:
     return NodeRecord(
-        node_id=node_id,
+        id=node_id,
         parent_id="p1",
         name="test.txt",
         is_directory=is_directory,
@@ -42,6 +42,7 @@ def _make_record(
         width=width,
         height=height,
         ms_duration=ms_duration,
+        mutable_id=MirrorMutableId(node_id),
     )
 
 
@@ -107,7 +108,7 @@ class _FakeStorage:
         return {nid: self._nodes[nid] for nid in ids if nid in self._nodes}
 
     async def upsert_node_and_emit_change(self, record: NodeRecord) -> None:
-        self._nodes[record.node_id] = record
+        self._nodes[record.id] = record
 
     async def delete_subtree_and_emit_changes(self, node_id: str) -> None:
         self._nodes.pop(node_id, None)
@@ -142,11 +143,11 @@ def _make_service(
     wq: asyncio.Queue = asyncio.Queue()
     off_main = _FakeOffMain()
     cs = NodeSyncService(
-        storage,  # type: ignore[arg-type]
-        wq,
-        off_main,  # type: ignore[arg-type]
-        {},
-        local_paths or {},
+        storage=storage,  # type: ignore[arg-type]
+        write_queue=wq,
+        off_main=off_main,  # type: ignore[arg-type]
+        mounts={},
+        local_paths=local_paths or {},
         metadata_queue=metadata_queue or asyncio.Queue(),
     )
     return cs, storage, wq
@@ -232,7 +233,7 @@ class TestNodeSyncServiceUpsertFileBatch(IsolatedAsyncioTestCase):
         # No existing DB record → goes to metadata queue
         self.assertEqual(mq.qsize(), 1)
         item = mq.get_nowait()
-        self.assertEqual(item.record.node_id, "new-file")
+        self.assertEqual(item.record.id, "new-file")
         self.assertTrue(item.force_refresh)
 
     async def test_with_local_paths_skips_complete_media(self):

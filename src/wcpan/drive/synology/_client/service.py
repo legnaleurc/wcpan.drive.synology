@@ -1,8 +1,8 @@
 """FileService implementation that talks to the wcpan.drive.synology server."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
-from typing import override
+from typing import cast, override
 
 from aiohttp import ClientSession
 from wcpan.drive.core.exceptions import NodeExistsError, NodeNotFoundError
@@ -17,7 +17,14 @@ from wcpan.drive.core.types import (
     WritableFile,
 )
 
-from .._lib import node_from_record, node_record_from_dict
+from .._lib import (
+    ChangeDict,
+    NodeRecordDict,
+    RemovedChangeDict,
+    UpsertChangeDict,
+    node_from_record,
+    node_record_from_dict,
+)
 from ..exceptions import SynologyApiError, SynologyServerError
 from .hasher import create_hasher
 from .http409 import node_from_409
@@ -26,7 +33,7 @@ from .writable import create_writable
 
 
 class ClientFileService(FileService):
-    def __init__(self, session: ClientSession, server_url: str) -> None:
+    def __init__(self, *, session: ClientSession, server_url: str) -> None:
         self._session = session
         self._url = server_url.rstrip("/")
 
@@ -44,7 +51,7 @@ class ClientFileService(FileService):
         async with self._session.get(f"{self._url}/api/v1/root") as response:
             _check(response.status, "get_root")
             data = await response.json()
-        return node_from_record(node_record_from_dict(data))
+        return node_from_record(node_record_from_dict(cast(NodeRecordDict, data)))
 
     @override
     async def get_changes(
@@ -62,14 +69,16 @@ class ClientFileService(FileService):
 
             cursor = str(data["cursor"])
             has_more = bool(data.get("has_more", False))
-            raw_changes = data.get("changes", [])
+            raw_changes = cast(list[ChangeDict], data.get("changes", []))
 
             actions: list[ChangeAction] = []
             for raw in raw_changes:
-                if raw.get("removed"):
-                    actions.append((True, raw["node_id"]))
+                if raw["removed"]:
+                    removed = cast(RemovedChangeDict, raw)
+                    actions.append((True, removed["node_id"]))
                 else:
-                    record = node_record_from_dict(raw["node"])
+                    upsert = cast(UpsertChangeDict, raw)
+                    record = node_record_from_dict(upsert["node"])
                     actions.append((False, node_from_record(record)))
 
             yield actions, cursor
@@ -98,7 +107,7 @@ class ClientFileService(FileService):
             _check(response.status, "move")
             data = await response.json()
 
-        return node_from_record(node_record_from_dict(data))
+        return node_from_record(node_record_from_dict(cast(NodeRecordDict, data)))
 
     @override
     async def delete(self, node: Node, *, permanent: bool = False) -> None:
@@ -143,12 +152,14 @@ class ClientFileService(FileService):
             _check(response.status, "create_directory")
             data = await response.json()
 
-        return node_from_record(node_record_from_dict(data))
+        return node_from_record(node_record_from_dict(cast(NodeRecordDict, data)))
 
     @asynccontextmanager
     @override
-    async def download_file(self, node: Node) -> AsyncIterator[ReadableFile]:
-        async with ClientReadableFile(self._session, self._url, node) as fin:
+    async def download_file(self, node: Node) -> AsyncGenerator[ReadableFile]:
+        async with ClientReadableFile(
+            node, session=self._session, server_url=self._url
+        ) as fin:
             yield fin
 
     @asynccontextmanager
@@ -162,7 +173,7 @@ class ClientFileService(FileService):
         mime_type: str | None,
         media_info: MediaInfo | None,
         private: PrivateDict | None,
-    ) -> AsyncIterator[WritableFile]:
+    ) -> AsyncGenerator[WritableFile]:
         async with create_writable(
             session=self._session,
             server_url=self._url,

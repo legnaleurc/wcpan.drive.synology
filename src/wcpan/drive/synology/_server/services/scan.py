@@ -5,13 +5,12 @@ from dataclasses import dataclass, field
 from logging import getLogger
 
 from ..._lib import utc_now
-from ...types import NodeRecord
-from ..api.files import list_folder
+from ...types import MirrorMutableId, MirrorStableId, NodeRecord
+from ..api.drive import SynologyDriveApi
+from ..api.lib import convert_file_info
 from ..lib.bfs import parallel_bfs
 from ..lib.mounts import SERVER_ROOT_ID, mount_id
-from ..lib.nodes import convert_file_info
-from ..types import SynologyPath
-from .network import NetworkService
+from ..types import SynologyFileId, SynologyPath
 from .paths import SynologyPathService
 from .storage import StorageService
 from .sync import NodeSyncService
@@ -24,15 +23,17 @@ _L = getLogger(__name__)
 class ScanAccumulator:
     """State for one incremental scan pass (deferred deletion)."""
 
-    seen_ids: set[str] = field(default_factory=lambda: set[str]())
-    subtree_preserve_roots: set[str] = field(default_factory=lambda: set[str]())
+    seen_ids: set[MirrorStableId] = field(default_factory=lambda: set[MirrorStableId]())
+    subtree_preserve_roots: set[MirrorStableId] = field(
+        default_factory=lambda: set[MirrorStableId]()
+    )
     highest: int = 0
 
 
 def _make_root_record() -> NodeRecord:
     now = utc_now()
     return NodeRecord(
-        node_id=SERVER_ROOT_ID,
+        id=SERVER_ROOT_ID,
         parent_id=None,
         name="",
         is_directory=True,
@@ -46,13 +47,14 @@ def _make_root_record() -> NodeRecord:
         width=0,
         height=0,
         ms_duration=0,
+        mutable_id=MirrorMutableId(""),
     )
 
 
 def _make_mount_record(name: str) -> NodeRecord:
     now = utc_now()
     return NodeRecord(
-        node_id=mount_id(name),
+        id=mount_id(name),
         parent_id=SERVER_ROOT_ID,
         name=name,
         is_directory=True,
@@ -66,6 +68,7 @@ def _make_mount_record(name: str) -> NodeRecord:
         width=0,
         height=0,
         ms_duration=0,
+        mutable_id=MirrorMutableId(""),
     )
 
 
@@ -79,26 +82,30 @@ class StartupScanService:
     def __init__(
         self,
         *,
-        network: NetworkService,
+        drive_api: SynologyDriveApi | None = None,
+        network: SynologyDriveApi | None = None,
         storage: StorageService,
         syno_paths: SynologyPathService,
         node_sync: NodeSyncService,
     ) -> None:
-        self._network = network
+        resolved_drive_api = drive_api or network
+        if resolved_drive_api is None:
+            raise ValueError("drive_api is required")
+        self._drive_api: SynologyDriveApi = resolved_drive_api
         self._storage = storage
         self._syno_paths = syno_paths
         self._node_sync = node_sync
 
     async def _scan_mount_level(
         self,
-        mid: str,
+        mid: MirrorStableId,
         syno_path: SynologyPath,
         last_max_id: int,
         acc: ScanAccumulator,
-    ) -> tuple[int, int, list[tuple[str, int, bool]]]:
+    ) -> tuple[int, int, list[tuple[MirrorStableId, int, bool]]]:
         """Scan the first level of a mount using the same child listing path service."""
         try:
-            items = await self._syno_paths.list_children(self._network, mid)
+            items = await self._syno_paths.list_children(self._drive_api, mid)
         except Exception:
             _L.exception("Failed to list mount path %r", syno_path)
             acc.subtree_preserve_roots.add(mid)
@@ -107,17 +114,19 @@ class StartupScanService:
         _L.debug("Mount %r: %d item(s) from API", syno_path, len(items))
 
         db_children = await self._storage.get_children(mid)
-        db_child_ids = {n.node_id for n in db_children}
+        db_child_ids = {n.id for n in db_children}
 
         for item in items:
-            acc.seen_ids.add(item["file_id"])
+            r = convert_file_info(item, parent_id=mid)
+            if r is not None:
+                acc.seen_ids.add(r.id)
 
         pre_scan_max_id = max(
             (item.get("max_id", item.get("sync_id", 0)) for item in items),
             default=last_max_id,
         )
         highest = last_max_id
-        subfolders: list[tuple[str, int, bool]] = []
+        subfolders: list[tuple[MirrorStableId, int, bool]] = []
         pending_upserts: list[NodeRecord] = []
 
         for item in items:
@@ -126,12 +135,15 @@ class StartupScanService:
             if sync_id > highest:
                 highest = sync_id
 
-            is_new = item["file_id"] not in db_child_ids
+            record = convert_file_info(item, parent_id=mid)
+            if record is None:
+                continue
+            is_new = record.id not in db_child_ids
             if sync_id > last_max_id or is_new:
-                pending_upserts.append(convert_file_info(item, parent_id=mid))
+                pending_upserts.append(record)
 
             if item["type"] == "dir":
-                subfolders.append((item["file_id"], max_id, is_new))
+                subfolders.append((record.id, max_id, is_new))
 
         if pending_upserts:
             await self._node_sync.upsert_batch(pending_upserts)
@@ -145,7 +157,7 @@ class StartupScanService:
 
     async def _scan_subtree_bfs(
         self,
-        initial: list[tuple[str, int, bool]],
+        initial: list[tuple[MirrorStableId, int, bool]],
         last_max_id: int,
         acc: ScanAccumulator,
     ) -> None:
@@ -153,8 +165,8 @@ class StartupScanService:
         acc.highest = last_max_id
 
         async def _visit(
-            entry: tuple[str, int, bool],
-        ) -> list[tuple[str, int, bool]]:
+            entry: tuple[MirrorStableId, int, bool],
+        ) -> list[tuple[MirrorStableId, int, bool]]:
             folder_id, this_max_id, force_scan = entry
 
             if not force_scan and last_max_id > 0 and this_max_id <= last_max_id:
@@ -162,8 +174,13 @@ class StartupScanService:
                 if db_children:
                     should_skip = True
                     try:
-                        _, api_count = await list_folder(
-                            self._network, folder_id, offset=0, limit=1
+                        record = await self._storage.get_node_by_id(folder_id)
+                        if record is None:
+                            raise ValueError(f"missing DB record for {folder_id}")
+                        _, api_count = await self._drive_api.list_folder(
+                            SynologyFileId.from_mirror_mutable_id(record.mutable_id),
+                            offset=0,
+                            limit=1,
                         )
                         if api_count != len(db_children):
                             _L.debug(
@@ -197,21 +214,23 @@ class StartupScanService:
 
             _L.debug("Entering folder %s (max_id=%d)", folder_id, this_max_id)
             try:
-                items = await self._syno_paths.list_children(self._network, folder_id)
+                items = await self._syno_paths.list_children(self._drive_api, folder_id)
             except Exception:
                 _L.exception("Failed to list folder %s", folder_id)
                 acc.subtree_preserve_roots.add(folder_id)
                 return []
 
             for item in items:
-                acc.seen_ids.add(item["file_id"])
+                r = convert_file_info(item, parent_id=folder_id)
+                if r is not None:
+                    acc.seen_ids.add(r.id)
 
             db_children = await self._storage.get_children(folder_id)
-            db_child_ids = {n.node_id for n in db_children}
+            db_child_ids = {n.id for n in db_children}
 
             pending_dir_upserts: list[NodeRecord] = []
             pending_file_records: list[NodeRecord] = []
-            children: list[tuple[str, int, bool]] = []
+            children: list[tuple[MirrorStableId, int, bool]] = []
 
             for item in items:
                 sync_id = item.get("sync_id", 0)
@@ -219,16 +238,18 @@ class StartupScanService:
                 if sync_id > acc.highest:
                     acc.highest = sync_id
 
-                is_new = item["file_id"] not in db_child_ids
+                record = convert_file_info(item, parent_id=folder_id)
+                if record is None:
+                    continue
+                is_new = record.id not in db_child_ids
                 if sync_id > last_max_id or is_new:
-                    record = convert_file_info(item, parent_id=folder_id)
                     if item["type"] == "dir":
                         pending_dir_upserts.append(record)
                     else:
                         pending_file_records.append(record)
 
                 if item["type"] == "dir":
-                    children.append((item["file_id"], max_id, is_new))
+                    children.append((record.id, max_id, is_new))
 
             if pending_dir_upserts:
                 await self._node_sync.upsert_batch(pending_dir_upserts)

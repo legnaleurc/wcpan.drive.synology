@@ -7,7 +7,7 @@ from unittest import TestCase
 from wcpan.drive.synology._server.services.paths import (
     _resolve_local_path as resolve_local_path,
 )
-from wcpan.drive.synology.types import NodeRecord
+from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
 def _node(
@@ -19,7 +19,7 @@ def _node(
 ) -> NodeRecord:
     t = datetime(2024, 1, 1, tzinfo=UTC)
     return NodeRecord(
-        node_id=node_id,
+        id=node_id,
         parent_id=parent_id,
         name=name,
         is_directory=is_directory,
@@ -33,6 +33,7 @@ def _node(
         width=0,
         height=0,
         ms_duration=0,
+        mutable_id=MirrorMutableId(node_id),
     )
 
 

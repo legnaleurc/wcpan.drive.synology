@@ -1,19 +1,50 @@
 import mimetypes
 from datetime import UTC, datetime
-from typing import Any
+from typing import Literal, TypedDict
 
 from wcpan.drive.core.types import Node
 
-from .types import NodeRecord
+from .types import MirrorMutableId, MirrorStableId, NodeRecord
 
 
 FOLDER_MIME_TYPE = "application/x-directory"
 
 
+class NodeRecordDict(TypedDict):
+    id: str
+    mutable_id: str
+    parent_id: str | None
+    name: str
+    is_directory: bool
+    ctime: str
+    mtime: str
+    mime_type: str
+    hash: str
+    size: int
+    is_image: bool
+    is_video: bool
+    width: int
+    height: int
+    ms_duration: int
+
+
+class RemovedChangeDict(TypedDict):
+    removed: Literal[True]
+    node_id: str
+
+
+class UpsertChangeDict(TypedDict):
+    removed: Literal[False]
+    node: NodeRecordDict
+
+
+type ChangeDict = RemovedChangeDict | UpsertChangeDict
+
+
 def node_from_record(record: NodeRecord) -> Node:
     return Node(
-        id=record.node_id,
-        parent_id=record.parent_id,
+        id=str(record.id),
+        parent_id=str(record.parent_id) if record.parent_id is not None else None,
         name=record.name,
         is_directory=record.is_directory,
         is_trashed=False,
@@ -31,10 +62,11 @@ def node_from_record(record: NodeRecord) -> Node:
     )
 
 
-def node_record_to_dict(record: NodeRecord) -> dict[str, Any]:
+def node_record_to_dict(record: NodeRecord) -> NodeRecordDict:
     return {
-        "node_id": record.node_id,
-        "parent_id": record.parent_id,
+        "id": str(record.id),
+        "mutable_id": str(record.mutable_id),
+        "parent_id": str(record.parent_id) if record.parent_id is not None else None,
         "name": record.name,
         "is_directory": record.is_directory,
         "ctime": record.ctime.isoformat(),
@@ -50,16 +82,18 @@ def node_record_to_dict(record: NodeRecord) -> dict[str, Any]:
     }
 
 
-def node_record_from_dict(data: dict[str, Any]) -> NodeRecord:
+def node_record_from_dict(data: NodeRecordDict) -> NodeRecord:
     ctime = datetime.fromisoformat(data["ctime"])
     mtime = datetime.fromisoformat(data["mtime"])
     if ctime.tzinfo is None:
         ctime = ctime.replace(tzinfo=UTC)
     if mtime.tzinfo is None:
         mtime = mtime.replace(tzinfo=UTC)
+    parent_id = data["parent_id"]
     return NodeRecord(
-        node_id=data["node_id"],
-        parent_id=data.get("parent_id"),
+        id=MirrorStableId(data["id"]),
+        mutable_id=MirrorMutableId(data["mutable_id"]),
+        parent_id=MirrorStableId(parent_id) if parent_id is not None else None,
         name=data["name"],
         is_directory=data["is_directory"],
         ctime=ctime,

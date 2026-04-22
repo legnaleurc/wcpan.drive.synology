@@ -8,10 +8,11 @@ from wcpan.drive.synology._client.http409 import node_from_409
 
 
 class TestNodeFrom409(IsolatedAsyncioTestCase):
-    async def test_returns_node_when_body_has_node_id(self) -> None:
+    async def test_returns_node_when_body_has_id(self) -> None:
         now = datetime.now(UTC).isoformat()
         payload = {
-            "node_id": "n1",
+            "id": "n1",
+            "mutable_id": "n1",
             "parent_id": "p",
             "name": "x",
             "is_directory": True,

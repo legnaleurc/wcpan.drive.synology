@@ -24,7 +24,7 @@ from wcpan.drive.synology._server.services.storage import StorageService
 from wcpan.drive.synology._server.services.sync import NodeSyncService
 from wcpan.drive.synology._server.types import WriteQueue
 from wcpan.drive.synology._server.workers import create_write_queue, metadata_worker
-from wcpan.drive.synology.types import NodeRecord
+from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
 def _node(
@@ -33,10 +33,11 @@ def _node(
     parent_id: str | None,
     *,
     is_directory: bool = False,
+    mutable_id: MirrorMutableId = MirrorMutableId(""),
 ) -> NodeRecord:
     t = datetime(2024, 1, 1, tzinfo=UTC)
     return NodeRecord(
-        node_id=node_id,
+        id=node_id,
         parent_id=parent_id,
         name=name,
         is_directory=is_directory,
@@ -50,6 +51,7 @@ def _node(
         width=0,
         height=0,
         ms_duration=0,
+        mutable_id=mutable_id,
     )
 
 
@@ -64,6 +66,7 @@ def _syno_item(
     mid = max_id if max_id is not None else sync_id
     return {
         "file_id": file_id,
+        "permanent_link": file_id,
         "parent_id": "",
         "name": name,
         "type": "dir" if is_dir else "file",
@@ -87,7 +90,6 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         *,
         by_path,
         list_all=None,
-        list_folder_fn=None,
         mute_tree_log_exception: bool = False,
     ) -> None:
         async def api_children(_self_svc: object, _net: object, parent_id: str) -> list:
@@ -109,14 +111,6 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         stack.enter_context(
             patch.object(NodeSyncService, "enrich", new=_noop_enrich_node_sync)
         )
-        if list_folder_fn is not None:
-            stack.enter_context(
-                patch.object(
-                    startup_scan_mod,
-                    "list_folder",
-                    new=AsyncMock(side_effect=list_folder_fn),
-                )
-            )
         if mute_tree_log_exception:
             stack.enter_context(
                 patch.object(startup_scan_mod._L, "exception", MagicMock())
@@ -138,8 +132,8 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool)
-                storage = StorageService(db_path, off_main)
+                off_main = OffMainThreadService(pool=pool)
+                storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -159,7 +153,14 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
 
                 q = create_write_queue()
                 mq: asyncio.Queue = asyncio.Queue()
-                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                cs = NodeSyncService(
+                    storage=storage,
+                    write_queue=q,
+                    off_main=off_main,
+                    mounts={},
+                    local_paths={},
+                    metadata_queue=mq,
+                )
                 drain = asyncio.create_task(self._drain_writes(q))
                 meta_drain = asyncio.create_task(
                     metadata_worker(mq, cs.process_metadata_item)
@@ -168,10 +169,13 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                     with ExitStack() as stack:
                         self._push_incremental_scan_mocks(stack, by_path=by_path)
                         svc = StartupScanService(
-                            network=None,  # type: ignore[arg-type]
+                            drive_api=MagicMock(),
                             storage=storage,
                             syno_paths=SynologyPathService(
-                                MountRegistry({"a": "/vol/a", "b": "/vol/b"}, {})
+                                registry=MountRegistry(
+                                    mounts={"a": "/vol/a", "b": "/vol/b"}, root_ids={}
+                                ),
+                                storage=storage,
                             ),
                             node_sync=cs,
                         )
@@ -202,8 +206,8 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool)
-                storage = StorageService(db_path, off_main)
+                off_main = OffMainThreadService(pool=pool)
+                storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -225,13 +229,22 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                     raise AssertionError(f"unexpected list of {folder_id}")
 
                 async def list_folder_fn(
-                    _net: object, folder_id: str, offset: int, limit: int
+                    folder_id: str, offset: int, limit: int
                 ) -> tuple:
                     return [], 1
 
+                drive_api = MagicMock()
+                drive_api.list_folder = AsyncMock(side_effect=list_folder_fn)
                 q = create_write_queue()
                 mq: asyncio.Queue = asyncio.Queue()
-                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                cs = NodeSyncService(
+                    storage=storage,
+                    write_queue=q,
+                    off_main=off_main,
+                    mounts={},
+                    local_paths={},
+                    metadata_queue=mq,
+                )
                 drain = asyncio.create_task(self._drain_writes(q))
                 meta_drain = asyncio.create_task(
                     metadata_worker(mq, cs.process_metadata_item)
@@ -242,13 +255,15 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                             stack,
                             by_path=by_path,
                             list_all=list_all,
-                            list_folder_fn=list_folder_fn,
                         )
                         svc = StartupScanService(
-                            network=None,  # type: ignore[arg-type]
+                            drive_api=drive_api,
                             storage=storage,
                             syno_paths=SynologyPathService(
-                                MountRegistry({"a": "/vol/a"}, {})
+                                registry=MountRegistry(
+                                    mounts={"a": "/vol/a"}, root_ids={}
+                                ),
+                                storage=storage,
                             ),
                             node_sync=cs,
                         )
@@ -274,8 +289,8 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool)
-                storage = StorageService(db_path, off_main)
+                off_main = OffMainThreadService(pool=pool)
+                storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -298,7 +313,14 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
 
                 q = create_write_queue()
                 mq: asyncio.Queue = asyncio.Queue()
-                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                cs = NodeSyncService(
+                    storage=storage,
+                    write_queue=q,
+                    off_main=off_main,
+                    mounts={},
+                    local_paths={},
+                    metadata_queue=mq,
+                )
                 drain = asyncio.create_task(self._drain_writes(q))
                 meta_drain = asyncio.create_task(
                     metadata_worker(mq, cs.process_metadata_item)
@@ -309,10 +331,13 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                             stack, by_path=by_path, list_all=list_all
                         )
                         svc = StartupScanService(
-                            network=None,  # type: ignore[arg-type]
+                            drive_api=MagicMock(),
                             storage=storage,
                             syno_paths=SynologyPathService(
-                                MountRegistry({"a": "/vol/a"}, {})
+                                registry=MountRegistry(
+                                    mounts={"a": "/vol/a"}, root_ids={}
+                                ),
+                                storage=storage,
                             ),
                             node_sync=cs,
                         )
@@ -338,8 +363,8 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool)
-                storage = StorageService(db_path, off_main)
+                off_main = OffMainThreadService(pool=pool)
+                storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -362,7 +387,14 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
 
                 q = create_write_queue()
                 mq: asyncio.Queue = asyncio.Queue()
-                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                cs = NodeSyncService(
+                    storage=storage,
+                    write_queue=q,
+                    off_main=off_main,
+                    mounts={},
+                    local_paths={},
+                    metadata_queue=mq,
+                )
                 drain = asyncio.create_task(self._drain_writes(q))
                 meta_drain = asyncio.create_task(
                     metadata_worker(mq, cs.process_metadata_item)
@@ -373,10 +405,13 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                             stack, by_path=by_path, list_all=list_all
                         )
                         svc = StartupScanService(
-                            network=None,  # type: ignore[arg-type]
+                            drive_api=MagicMock(),
                             storage=storage,
                             syno_paths=SynologyPathService(
-                                MountRegistry({"a": "/vol/a"}, {})
+                                registry=MountRegistry(
+                                    mounts={"a": "/vol/a"}, root_ids={}
+                                ),
+                                storage=storage,
                             ),
                             node_sync=cs,
                         )
@@ -403,8 +438,8 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool)
-                storage = StorageService(db_path, off_main)
+                off_main = OffMainThreadService(pool=pool)
+                storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -428,7 +463,14 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
 
                 q = create_write_queue()
                 mq: asyncio.Queue = asyncio.Queue()
-                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                cs = NodeSyncService(
+                    storage=storage,
+                    write_queue=q,
+                    off_main=off_main,
+                    mounts={},
+                    local_paths={},
+                    metadata_queue=mq,
+                )
                 drain = asyncio.create_task(self._drain_writes(q))
                 meta_drain = asyncio.create_task(
                     metadata_worker(mq, cs.process_metadata_item)
@@ -439,10 +481,13 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                             stack, by_path=by_path, list_all=list_all
                         )
                         svc = StartupScanService(
-                            network=None,  # type: ignore[arg-type]
+                            drive_api=MagicMock(),
                             storage=storage,
                             syno_paths=SynologyPathService(
-                                MountRegistry({"a": "/vol/a"}, {})
+                                registry=MountRegistry(
+                                    mounts={"a": "/vol/a"}, root_ids={}
+                                ),
+                                storage=storage,
                             ),
                             node_sync=cs,
                         )
@@ -467,8 +512,8 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool)
-                storage = StorageService(db_path, off_main)
+                off_main = OffMainThreadService(pool=pool)
+                storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -495,7 +540,14 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
 
                 q = create_write_queue()
                 mq: asyncio.Queue = asyncio.Queue()
-                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                cs = NodeSyncService(
+                    storage=storage,
+                    write_queue=q,
+                    off_main=off_main,
+                    mounts={},
+                    local_paths={},
+                    metadata_queue=mq,
+                )
                 drain = asyncio.create_task(self._drain_writes(q))
                 meta_drain = asyncio.create_task(
                     metadata_worker(mq, cs.process_metadata_item)
@@ -509,10 +561,13 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                             mute_tree_log_exception=True,
                         )
                         svc = StartupScanService(
-                            network=None,  # type: ignore[arg-type]
+                            drive_api=MagicMock(),
                             storage=storage,
                             syno_paths=SynologyPathService(
-                                MountRegistry({"a": "/vol/a"}, {})
+                                registry=MountRegistry(
+                                    mounts={"a": "/vol/a"}, root_ids={}
+                                ),
+                                storage=storage,
                             ),
                             node_sync=cs,
                         )
@@ -538,41 +593,61 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool)
-                storage = StorageService(db_path, off_main)
+                off_main = OffMainThreadService(pool=pool)
+                storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
                         _node(SERVER_ROOT_ID, "", None, is_directory=True),
                         _node(mount_id("a"), "a", SERVER_ROOT_ID, is_directory=True),
-                        _node("dirF", "F", mount_id("a"), is_directory=True),
-                        _node("child1", "a.txt", "dirF"),
-                        _node("child2", "b.txt", "dirF"),
+                        _node(
+                            "perm:dirF",
+                            "F",
+                            mount_id("a"),
+                            is_directory=True,
+                            mutable_id=MirrorMutableId("dirF"),
+                        ),
+                        _node("child1", "a.txt", "perm:dirF"),
+                        _node("child2", "b.txt", "perm:dirF"),
                     ]
                 )
 
                 async def by_path(_net: object, path: str) -> list:
                     if path == "/vol/a":
                         return [
-                            _syno_item("dirF", "F", is_dir=True, sync_id=10, max_id=10)
+                            {
+                                **_syno_item(
+                                    "dirF", "F", is_dir=True, sync_id=10, max_id=10
+                                ),
+                                "permanent_link": "perm:dirF",
+                            }
                         ]
                     return []
 
                 async def list_all(_net: object, folder_id: str) -> list:
-                    if folder_id == "dirF":
+                    if folder_id == "perm:dirF":
                         return [_syno_item("child1", "a.txt")]
                     return []
 
                 async def list_folder_fn(
-                    _net: object, folder_id: str, offset: int, limit: int
+                    folder_id: str, offset: int, limit: int
                 ) -> tuple:
                     if folder_id == "dirF":
                         return [], 1
                     return [], 0
 
+                drive_api = MagicMock()
+                drive_api.list_folder = AsyncMock(side_effect=list_folder_fn)
                 q = create_write_queue()
                 mq: asyncio.Queue = asyncio.Queue()
-                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                cs = NodeSyncService(
+                    storage=storage,
+                    write_queue=q,
+                    off_main=off_main,
+                    mounts={},
+                    local_paths={},
+                    metadata_queue=mq,
+                )
                 drain = asyncio.create_task(self._drain_writes(q))
                 meta_drain = asyncio.create_task(
                     metadata_worker(mq, cs.process_metadata_item)
@@ -583,13 +658,15 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                             stack,
                             by_path=by_path,
                             list_all=list_all,
-                            list_folder_fn=list_folder_fn,
                         )
                         svc = StartupScanService(
-                            network=None,  # type: ignore[arg-type]
+                            drive_api=drive_api,
                             storage=storage,
                             syno_paths=SynologyPathService(
-                                MountRegistry({"a": "/vol/a"}, {})
+                                registry=MountRegistry(
+                                    mounts={"a": "/vol/a"}, root_ids={}
+                                ),
+                                storage=storage,
                             ),
                             node_sync=cs,
                         )
@@ -615,8 +692,8 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool)
-                storage = StorageService(db_path, off_main)
+                off_main = OffMainThreadService(pool=pool)
+                storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -633,7 +710,14 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
 
                 q = create_write_queue()
                 mq: asyncio.Queue = asyncio.Queue()
-                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                cs = NodeSyncService(
+                    storage=storage,
+                    write_queue=q,
+                    off_main=off_main,
+                    mounts={},
+                    local_paths={},
+                    metadata_queue=mq,
+                )
                 drain = asyncio.create_task(self._drain_writes(q))
                 meta_drain = asyncio.create_task(
                     metadata_worker(mq, cs.process_metadata_item)
@@ -646,10 +730,13 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                             mute_tree_log_exception=True,
                         )
                         svc = StartupScanService(
-                            network=None,  # type: ignore[arg-type]
+                            drive_api=MagicMock(),
                             storage=storage,
                             syno_paths=SynologyPathService(
-                                MountRegistry({"a": "/vol/a", "b": "/vol/b"}, {})
+                                registry=MountRegistry(
+                                    mounts={"a": "/vol/a", "b": "/vol/b"}, root_ids={}
+                                ),
+                                storage=storage,
                             ),
                             node_sync=cs,
                         )
@@ -676,8 +763,8 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool)
-                storage = StorageService(db_path, off_main)
+                off_main = OffMainThreadService(pool=pool)
+                storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -708,14 +795,21 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                     entered.append(folder_id)
                     return []
 
-                async def list_one(
-                    _net: object, folder_id: str, offset: int, limit: int
-                ) -> tuple:
+                async def list_one(folder_id: str, offset: int, limit: int) -> tuple:
                     return [], 1
 
+                drive_api = MagicMock()
+                drive_api.list_folder = AsyncMock(side_effect=list_one)
                 q = create_write_queue()
                 mq: asyncio.Queue = asyncio.Queue()
-                cs = NodeSyncService(storage, q, off_main, {}, {}, metadata_queue=mq)
+                cs = NodeSyncService(
+                    storage=storage,
+                    write_queue=q,
+                    off_main=off_main,
+                    mounts={},
+                    local_paths={},
+                    metadata_queue=mq,
+                )
                 drain = asyncio.create_task(self._drain_writes(q))
                 meta_drain = asyncio.create_task(
                     metadata_worker(mq, cs.process_metadata_item)
@@ -726,13 +820,15 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
                             stack,
                             by_path=by_path,
                             list_all=list_all,
-                            list_folder_fn=list_one,
                         )
                         svc = StartupScanService(
-                            network=None,  # type: ignore[arg-type]
+                            drive_api=drive_api,
                             storage=storage,
                             syno_paths=SynologyPathService(
-                                MountRegistry({"a": "/vol/a", "b": "/vol/b"}, {})
+                                registry=MountRegistry(
+                                    mounts={"a": "/vol/a", "b": "/vol/b"}, root_ids={}
+                                ),
+                                storage=storage,
                             ),
                             node_sync=cs,
                         )

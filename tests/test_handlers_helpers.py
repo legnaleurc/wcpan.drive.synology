@@ -7,13 +7,13 @@ from wcpan.drive.synology._server.handlers.lib import (
     media_info_from_query,
     record_to_response,
 )
-from wcpan.drive.synology.types import NodeRecord
+from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
 def _sample_record() -> NodeRecord:
     now = datetime(2024, 3, 1, tzinfo=UTC)
     return NodeRecord(
-        node_id="id1",
+        id="id1",
         parent_id="p1",
         name="x.txt",
         is_directory=False,
@@ -27,6 +27,7 @@ def _sample_record() -> NodeRecord:
         width=0,
         height=0,
         ms_duration=0,
+        mutable_id=MirrorMutableId("id1"),
     )
 
 
@@ -73,5 +74,5 @@ class TestRecordToResponse(TestCase):
         # when
         body = record_to_response(record)
         # then
-        self.assertEqual(body["node_id"], record.node_id)
+        self.assertEqual(body["id"], record.id)
         self.assertEqual(body["name"], record.name)

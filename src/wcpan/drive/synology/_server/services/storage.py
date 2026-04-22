@@ -1,11 +1,11 @@
 import logging
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from typing import Literal, TypedDict
 
-from ...types import NodeRecord
+from ...types import MirrorMutableId, MirrorStableId, NodeRecord
 from ..lib.mounts import SERVER_ROOT_ID
 from ..types import SynologyPath
 from .off_main import OffMainThreadService
@@ -16,7 +16,7 @@ _L = logging.getLogger(__name__)
 
 class WebhookDeleteOperation(TypedDict):
     type: Literal["delete"]
-    node_id: str
+    node_id: MirrorStableId
 
 
 class WebhookUpsertOperation(TypedDict):
@@ -36,23 +36,25 @@ PRAGMA journal_mode = WAL;
 PRAGMA cache_size = -65536;
 
 CREATE TABLE IF NOT EXISTS nodes (
-    node_id     TEXT    PRIMARY KEY,
-    parent_id   TEXT,
-    name        TEXT    NOT NULL,
+    id           TEXT    PRIMARY KEY,
+    mutable_id   TEXT    NOT NULL,
+    parent_id    TEXT,
+    name         TEXT    NOT NULL,
     is_directory INTEGER NOT NULL DEFAULT 0,
-    ctime       INTEGER NOT NULL,
-    mtime       INTEGER NOT NULL,
-    mime_type   TEXT    NOT NULL DEFAULT '',
-    hash        TEXT    NOT NULL DEFAULT '',
-    size        INTEGER NOT NULL DEFAULT 0,
-    is_image    INTEGER NOT NULL DEFAULT 0,
-    is_video    INTEGER NOT NULL DEFAULT 0,
-    width       INTEGER NOT NULL DEFAULT 0,
-    height      INTEGER NOT NULL DEFAULT 0,
-    ms_duration INTEGER NOT NULL DEFAULT 0
+    ctime        INTEGER NOT NULL,
+    mtime        INTEGER NOT NULL,
+    mime_type    TEXT    NOT NULL DEFAULT '',
+    hash         TEXT    NOT NULL DEFAULT '',
+    size         INTEGER NOT NULL DEFAULT 0,
+    is_image     INTEGER NOT NULL DEFAULT 0,
+    is_video     INTEGER NOT NULL DEFAULT 0,
+    width        INTEGER NOT NULL DEFAULT 0,
+    height       INTEGER NOT NULL DEFAULT 0,
+    ms_duration  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS ix_nodes_parent_id ON nodes(parent_id);
+CREATE INDEX IF NOT EXISTS ix_nodes_mutable_id ON nodes(mutable_id);
 
 CREATE TABLE IF NOT EXISTS changes (
     change_id  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,15 +71,16 @@ CREATE TABLE IF NOT EXISTS mounts (
 );
 """
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _MAX_CHANGES_PER_PAGE = 1000
 
 _UPSERT_NODE_SQL = """
             INSERT INTO nodes
-                (node_id, parent_id, name, is_directory, ctime, mtime,
+                (id, mutable_id, parent_id, name, is_directory, ctime, mtime,
                  mime_type, hash, size, is_image, is_video, width, height, ms_duration)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(node_id) DO UPDATE SET
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                mutable_id=excluded.mutable_id,
                 parent_id=excluded.parent_id,
                 name=excluded.name,
                 is_directory=excluded.is_directory,
@@ -97,10 +100,11 @@ _UPSERT_NODE_SQL = """
 # so that media info set by the API upload handler is not overwritten with zeros.
 _PRESERVE_MEDIA_UPSERT_SQL = """
             INSERT INTO nodes
-                (node_id, parent_id, name, is_directory, ctime, mtime,
+                (id, mutable_id, parent_id, name, is_directory, ctime, mtime,
                  mime_type, hash, size, is_image, is_video, width, height, ms_duration)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(node_id) DO UPDATE SET
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                mutable_id=excluded.mutable_id,
                 parent_id=excluded.parent_id,
                 name=excluded.name,
                 is_directory=excluded.is_directory,
@@ -119,10 +123,13 @@ _PRESERVE_MEDIA_UPSERT_SQL = """
 
 def _node_row_values(
     record: NodeRecord,
-) -> tuple[str, str | None, str, int, int, int, str, str, int, int, int, int, int, int]:
+) -> tuple[
+    str, str, str | None, str, int, int, int, str, str, int, int, int, int, int, int
+]:
     return (
-        record.node_id,
-        record.parent_id,
+        str(record.id),
+        str(record.mutable_id),
+        str(record.parent_id) if record.parent_id is not None else None,
         record.name,
         1 if record.is_directory else 0,
         int(record.ctime.timestamp()),
@@ -145,7 +152,7 @@ def _open(dsn: str) -> sqlite3.Connection:
 
 
 @contextmanager
-def _read_only(dsn: str) -> Iterator[sqlite3.Connection]:
+def _read_only(dsn: str) -> Generator[sqlite3.Connection]:
     """Open for SELECT-only; accidental writes raise at SQLite level."""
     con = _open(dsn)
     try:
@@ -156,7 +163,7 @@ def _read_only(dsn: str) -> Iterator[sqlite3.Connection]:
 
 
 @contextmanager
-def _read_write(dsn: str) -> Iterator[sqlite3.Connection]:
+def _read_write(dsn: str) -> Generator[sqlite3.Connection]:
     con = _open(dsn)
     try:
         yield con
@@ -246,23 +253,26 @@ def _upsert_node_and_emit_change(dsn: str, record: NodeRecord) -> None:
         con.execute(_PRESERVE_MEDIA_UPSERT_SQL, _node_row_values(record))
         con.execute(
             "INSERT INTO changes (node_id, is_removed) VALUES (?, 0)",
-            (record.node_id,),
+            (str(record.id),),
         )
 
 
-def _delete_subtree_on_connection(con: sqlite3.Connection, node_id: str) -> None:
+def _delete_subtree_on_connection(
+    con: sqlite3.Connection,
+    node_id: MirrorStableId,
+) -> None:
     """Delete node and all descendants; emit remove-changes for each."""
     # Find all descendants including the root node_id using a recursive CTE.
     sql = """
     WITH RECURSIVE descendants(node_id) AS (
         SELECT ?
         UNION ALL
-        SELECT n.node_id FROM nodes n
+        SELECT n.id FROM nodes n
         JOIN descendants d ON n.parent_id = d.node_id
     )
     SELECT node_id FROM descendants
     """
-    with closing(con.execute(sql, (node_id,))) as cur:
+    with closing(con.execute(sql, (str(node_id),))) as cur:
         to_delete = [row["node_id"] for row in cur]
 
     if not to_delete:
@@ -270,14 +280,14 @@ def _delete_subtree_on_connection(con: sqlite3.Connection, node_id: str) -> None
 
     # Delete from nodes and insert into changes in bulk.
     placeholders = ",".join("?" * len(to_delete))
-    con.execute(f"DELETE FROM nodes WHERE node_id IN ({placeholders})", to_delete)
+    con.execute(f"DELETE FROM nodes WHERE id IN ({placeholders})", to_delete)
     con.executemany(
         "INSERT INTO changes (node_id, is_removed) VALUES (?, 1)",
         [(nid,) for nid in to_delete],
     )
 
 
-def _delete_subtree_and_emit_changes(dsn: str, node_id: str) -> None:
+def _delete_subtree_and_emit_changes(dsn: str, node_id: MirrorStableId) -> None:
     with _read_write(dsn) as con:
         _delete_subtree_on_connection(con, node_id)
 
@@ -291,7 +301,9 @@ def _bulk_upsert_nodes(dsn: str, records: list[NodeRecord]) -> None:
 
 
 def _apply_scan_folder_batch(
-    dsn: str, delete_roots: list[str], upserts: list[NodeRecord]
+    dsn: str,
+    delete_roots: list[MirrorStableId],
+    upserts: list[NodeRecord],
 ) -> None:
     """Apply all subtree removals and upserts for one polled folder in one transaction.
 
@@ -309,59 +321,78 @@ def _apply_scan_folder_batch(
         )
         con.executemany(
             "INSERT INTO changes (node_id, is_removed) VALUES (?, 0)",
-            [(r.node_id,) for r in upserts],
+            [(str(r.id),) for r in upserts],
         )
 
 
-def _get_node_by_id(dsn: str, node_id: str) -> NodeRecord | None:
+def _get_node_by_id(dsn: str, node_id: MirrorStableId) -> NodeRecord | None:
     with _read_only(dsn) as con:
         with closing(
-            con.execute("SELECT * FROM nodes WHERE node_id = ?", (node_id,))
+            con.execute("SELECT * FROM nodes WHERE id = ?", (str(node_id),))
         ) as cur:
             row = cur.fetchone()
     return _row_to_record(row) if row else None
 
 
-def _get_nodes_by_ids(dsn: str, node_ids: list[str]) -> dict[str, NodeRecord]:
+def _get_nodes_by_ids(
+    dsn: str,
+    node_ids: list[MirrorStableId],
+) -> dict[MirrorStableId, NodeRecord]:
     if not node_ids:
         return {}
     with _read_only(dsn) as con:
         placeholders = ",".join("?" * len(node_ids))
         with closing(
             con.execute(
-                f"SELECT * FROM nodes WHERE node_id IN ({placeholders})", node_ids
+                f"SELECT * FROM nodes WHERE id IN ({placeholders})",
+                [str(_) for _ in node_ids],
             )
         ) as cur:
             rows = cur.fetchall()
-    return {row["node_id"]: _row_to_record(row) for row in rows}
+    return {MirrorStableId(row["id"]): _row_to_record(row) for row in rows}
 
 
-def _get_children(dsn: str, parent_id: str) -> list[NodeRecord]:
+def _get_node_by_mutable_id(
+    dsn: str,
+    mutable_id: MirrorMutableId,
+) -> NodeRecord | None:
     with _read_only(dsn) as con:
         with closing(
-            con.execute("SELECT * FROM nodes WHERE parent_id = ?", (parent_id,))
+            con.execute(
+                "SELECT * FROM nodes WHERE mutable_id = ?",
+                (mutable_id,),
+            )
+        ) as cur:
+            row = cur.fetchone()
+    return _row_to_record(row) if row else None
+
+
+def _get_children(dsn: str, parent_id: MirrorStableId) -> list[NodeRecord]:
+    with _read_only(dsn) as con:
+        with closing(
+            con.execute("SELECT * FROM nodes WHERE parent_id = ?", (str(parent_id),))
         ) as cur:
             rows = cur.fetchall()
     return [_row_to_record(r) for r in rows]
 
 
-def _collect_subtree_node_ids(dsn: str, root_id: str) -> set[str]:
+def _collect_subtree_node_ids(dsn: str, root_id: MirrorStableId) -> set[MirrorStableId]:
     """All node_id values in the DB subtree rooted at *root_id* (including *root_id*)."""
     sql = """
     WITH RECURSIVE descendants(node_id) AS (
         SELECT ?
         UNION ALL
-        SELECT n.node_id FROM nodes n
+        SELECT n.id FROM nodes n
         JOIN descendants d ON n.parent_id = d.node_id
     )
     SELECT node_id FROM descendants
     """
     with _read_only(dsn) as con:
-        with closing(con.execute(sql, (root_id,))) as cur:
-            return {row["node_id"] for row in cur}
+        with closing(con.execute(sql, (str(root_id),))) as cur:
+            return {MirrorStableId(row["node_id"]) for row in cur}
 
 
-def _get_ancestors(dsn: str, node_id: str) -> list[NodeRecord]:
+def _get_ancestors(dsn: str, node_id: MirrorStableId) -> list[NodeRecord]:
     """Fetch the ancestor chain starting from *node_id*, stopping before virtual nodes.
 
     Returns all nodes from *node_id* up to (but not including) the first virtual
@@ -369,21 +400,23 @@ def _get_ancestors(dsn: str, node_id: str) -> list[NodeRecord]:
     """
     sql = """
     WITH RECURSIVE ancestors AS (
-        SELECT * FROM nodes WHERE node_id = ?
+        SELECT * FROM nodes WHERE id = ?
         UNION ALL
         SELECT n.* FROM nodes n
-        JOIN ancestors a ON n.node_id = a.parent_id
+        JOIN ancestors a ON n.id = a.parent_id
         WHERE a.parent_id IS NOT NULL AND a.parent_id NOT GLOB '_*'
     )
     SELECT * FROM ancestors
     """
     with _read_only(dsn) as con:
-        with closing(con.execute(sql, (node_id,))) as cur:
+        with closing(con.execute(sql, (str(node_id),))) as cur:
             return [_row_to_record(r) for r in cur.fetchall()]
 
 
 def _apply_deferred_scan_removals(
-    dsn: str, preserved: set[str], mount_ids: set[str]
+    dsn: str,
+    preserved: set[MirrorStableId],
+    mount_ids: set[MirrorStableId],
 ) -> None:
     """Remove Synology subtrees under *mount_ids* that are not in *preserved*."""
     if not mount_ids:
@@ -394,19 +427,24 @@ def _apply_deferred_scan_removals(
     # parent_ids so we can compute deletion roots in one transaction.
     sql = f"""
     WITH RECURSIVE descendants(node_id, parent_id) AS (
-        SELECT node_id, parent_id FROM nodes WHERE node_id IN ({placeholders})
+        SELECT id, parent_id FROM nodes WHERE id IN ({placeholders})
         UNION ALL
-        SELECT n.node_id, n.parent_id FROM nodes n
+        SELECT n.id, n.parent_id FROM nodes n
         JOIN descendants d ON n.parent_id = d.node_id
     )
     SELECT node_id, parent_id FROM descendants WHERE node_id NOT GLOB '_*'
     """
     with _read_write(dsn) as con:
-        with closing(con.execute(sql, tuple(mount_ids))) as cur:
+        with closing(con.execute(sql, tuple(str(_) for _ in mount_ids))) as cur:
             rows = cur.fetchall()
 
-        parent_by_id: dict[str, str | None] = {
-            row["node_id"]: row["parent_id"] for row in rows
+        parent_by_id: dict[MirrorStableId, MirrorStableId | None] = {
+            MirrorStableId(row["node_id"]): (
+                MirrorStableId(row["parent_id"])
+                if row["parent_id"] is not None
+                else None
+            )
+            for row in rows
         }
         candidates = {nid for nid in parent_by_id if nid not in preserved}
         if not candidates:
@@ -432,7 +470,7 @@ def _get_changes_since(
     dsn: str,
     cursor: int,
     max_size: int = _MAX_CHANGES_PER_PAGE,
-) -> tuple[list[tuple[str, bool, NodeRecord | None]], int, bool]:
+) -> tuple[list[tuple[MirrorStableId, bool, NodeRecord | None]], int, bool]:
     """Return (changes, new_cursor, has_more).
 
     Each change is (node_id, is_removed).
@@ -442,11 +480,12 @@ def _get_changes_since(
             con.execute(
                 """
             SELECT c.change_id, c.node_id, c.is_removed,
-                   n.parent_id, n.name, n.is_directory, n.ctime, n.mtime,
+                   n.id,
+                   n.mutable_id, n.parent_id, n.name, n.is_directory, n.ctime, n.mtime,
                    n.mime_type, n.hash, n.size, n.is_image, n.is_video,
                    n.width, n.height, n.ms_duration
             FROM changes c
-            LEFT JOIN nodes n ON c.node_id = n.node_id
+            LEFT JOIN nodes n ON c.node_id = n.id
             WHERE c.change_id > ?
             ORDER BY c.change_id ASC
             LIMIT ?
@@ -459,13 +498,13 @@ def _get_changes_since(
     has_more = len(rows) > max_size
     rows = rows[:max_size]
 
-    result: list[tuple[str, bool, NodeRecord | None]] = []
+    result: list[tuple[MirrorStableId, bool, NodeRecord | None]] = []
     for row in rows:
         is_removed = bool(row["is_removed"])
         record: NodeRecord | None = None
         if not is_removed and row["name"] is not None:
             record = _row_to_record(row)
-        result.append((row["node_id"], is_removed, record))
+        result.append((MirrorStableId(row["node_id"]), is_removed, record))
 
     new_cursor = rows[-1]["change_id"] if rows else cursor
     return result, new_cursor, has_more
@@ -473,8 +512,11 @@ def _get_changes_since(
 
 def _row_to_record(row: sqlite3.Row) -> NodeRecord:
     return NodeRecord(
-        node_id=row["node_id"],
-        parent_id=row["parent_id"],
+        id=MirrorStableId(row["id"] if "id" in row.keys() else row["node_id"]),
+        mutable_id=MirrorMutableId(row["mutable_id"]),
+        parent_id=(
+            MirrorStableId(row["parent_id"]) if row["parent_id"] is not None else None
+        ),
         name=row["name"],
         is_directory=bool(row["is_directory"]),
         ctime=datetime.fromtimestamp(row["ctime"], UTC),
@@ -495,11 +537,11 @@ _GC_CREATE_SQL = """
     WITH RECURSIVE reachable(node_id) AS (
         SELECT ?
         UNION ALL
-        SELECT n.node_id FROM nodes n
+        SELECT n.id FROM nodes n
         JOIN reachable r ON n.parent_id = r.node_id
     )
-    SELECT node_id FROM nodes
-    WHERE node_id NOT IN (SELECT node_id FROM reachable)
+    SELECT id AS node_id FROM nodes
+    WHERE id NOT IN (SELECT node_id FROM reachable)
 """
 
 
@@ -510,7 +552,7 @@ def cleanup_dangling_nodes(dsn: str) -> int:
     """
     _ensure_schema(dsn)
     with _read_write(dsn) as con:
-        con.execute(_GC_CREATE_SQL, (SERVER_ROOT_ID,))
+        con.execute(_GC_CREATE_SQL, (str(SERVER_ROOT_ID),))
         with closing(con.execute("SELECT COUNT(*) AS n FROM temp._dangling")) as cur:
             count = int(cur.fetchone()["n"])
         if count > 0:
@@ -519,7 +561,7 @@ def cleanup_dangling_nodes(dsn: str) -> int:
                 " SELECT node_id, 1 FROM temp._dangling"
             )
             con.execute(
-                "DELETE FROM nodes WHERE node_id IN (SELECT node_id FROM temp._dangling)"
+                "DELETE FROM nodes WHERE id IN (SELECT node_id FROM temp._dangling)"
             )
         con.execute("DROP TABLE IF EXISTS temp._dangling")
     return count
@@ -535,8 +577,8 @@ def reset_change_history(dsn: str) -> int:
         con.execute("DELETE FROM changes")
         con.execute(
             "INSERT INTO changes (node_id, is_removed)"
-            " SELECT node_id, 0 FROM nodes WHERE node_id != ?",
-            (SERVER_ROOT_ID,),
+            " SELECT id, 0 FROM nodes WHERE id != ?",
+            (str(SERVER_ROOT_ID),),
         )
         with closing(con.execute("SELECT COUNT(*) AS n FROM changes")) as cur:
             return int(cur.fetchone()["n"])
@@ -555,20 +597,22 @@ def _apply_webhook_batch(dsn: str, operations: list[WebhookOperation]) -> None:
                 con.execute(_PRESERVE_MEDIA_UPSERT_SQL, _node_row_values(record))
                 con.execute(
                     "INSERT INTO changes (node_id, is_removed) VALUES (?, 0)",
-                    (record.node_id,),
+                    (str(record.id),),
                 )
 
 
 def _build_deferred_preserved_set(
-    dsn: str, seen_ids: set[str], preserve_roots: set[str]
-) -> set[str]:
+    dsn: str,
+    seen_ids: set[MirrorStableId],
+    preserve_roots: set[MirrorStableId],
+) -> set[MirrorStableId]:
     preserved = set(seen_ids)
     for root in preserve_roots:
         preserved |= _collect_subtree_node_ids(dsn, root)
     return preserved
 
 
-def _resolve_path_to_id(dsn: str, segments: list[str]) -> str | None:
+def _resolve_path_to_id(dsn: str, segments: list[str]) -> MirrorStableId | None:
     """Resolve a list of directory names to a final node_id using one recursive query.
 
     Matches only nodes where is_directory = 1.
@@ -593,12 +637,12 @@ def _resolve_path_to_id(dsn: str, segments: list[str]) -> str | None:
         {lvl_sql}
     ),
     traversal(node_id, lvl) AS (
-        SELECT n.node_id, 0
+        SELECT n.id, 0
         FROM nodes n
         JOIN path_segments ps ON n.name = ps.name AND ps.lvl = 0
         WHERE n.parent_id = ? AND n.is_directory = 1
         UNION ALL
-        SELECT n.node_id, t.lvl + 1
+        SELECT n.id, t.lvl + 1
         FROM nodes n
         JOIN traversal t ON n.parent_id = t.node_id
         JOIN path_segments ps ON n.name = ps.name AND ps.lvl = t.lvl + 1
@@ -607,18 +651,18 @@ def _resolve_path_to_id(dsn: str, segments: list[str]) -> str | None:
     SELECT node_id FROM traversal
     WHERE lvl = ?
     """
-    params = list(segments) + [SERVER_ROOT_ID, len(segments) - 1]
+    params = list(segments) + [str(SERVER_ROOT_ID), len(segments) - 1]
 
     with _read_only(dsn) as con:
         with closing(con.execute(sql, params)) as cur:
             row = cur.fetchone()
-    return row["node_id"] if row else None
+    return MirrorStableId(row["node_id"]) if row else None
 
 
 class StorageService:
     """Async SQLite access — delegates blocking calls to OffMainThreadService."""
 
-    def __init__(self, dsn: str, off_main: OffMainThreadService) -> None:
+    def __init__(self, dsn: str, *, off_main: OffMainThreadService) -> None:
         self._dsn = dsn
         self._off_main = off_main
 
@@ -642,44 +686,62 @@ class StorageService:
     async def upsert_node_and_emit_change(self, record: NodeRecord) -> None:
         await self._off_main(_upsert_node_and_emit_change, self._dsn, record)
 
-    async def delete_subtree_and_emit_changes(self, node_id: str) -> None:
+    async def delete_subtree_and_emit_changes(self, node_id: MirrorStableId) -> None:
         await self._off_main(_delete_subtree_and_emit_changes, self._dsn, node_id)
 
     async def apply_scan_folder_batch(
-        self, delete_roots: list[str], upserts: list[NodeRecord]
+        self,
+        delete_roots: list[MirrorStableId],
+        upserts: list[NodeRecord],
     ) -> None:
         await self._off_main(_apply_scan_folder_batch, self._dsn, delete_roots, upserts)
 
     async def apply_webhook_batch(self, operations: list[WebhookOperation]) -> None:
         await self._off_main(_apply_webhook_batch, self._dsn, operations)
 
-    async def resolve_path_to_id(self, segments: list[str]) -> str | None:
+    async def resolve_path_to_id(self, segments: list[str]) -> MirrorStableId | None:
         return await self._off_main(_resolve_path_to_id, self._dsn, segments)
 
-    async def get_node_by_id(self, node_id: str) -> NodeRecord | None:
+    async def get_node_by_id(self, node_id: MirrorStableId) -> NodeRecord | None:
         return await self._off_main(_get_node_by_id, self._dsn, node_id)
 
-    async def get_nodes_by_ids(self, node_ids: list[str]) -> dict[str, NodeRecord]:
+    async def get_nodes_by_ids(
+        self,
+        node_ids: list[MirrorStableId],
+    ) -> dict[MirrorStableId, NodeRecord]:
         return await self._off_main(_get_nodes_by_ids, self._dsn, node_ids)
 
-    async def get_children(self, parent_id: str) -> list[NodeRecord]:
+    async def get_node_by_mutable_id(
+        self,
+        mutable_id: MirrorMutableId,
+    ) -> NodeRecord | None:
+        return await self._off_main(_get_node_by_mutable_id, self._dsn, mutable_id)
+
+    async def get_children(self, parent_id: MirrorStableId) -> list[NodeRecord]:
         return await self._off_main(_get_children, self._dsn, parent_id)
 
-    async def get_ancestors(self, node_id: str) -> list[NodeRecord]:
+    async def get_ancestors(self, node_id: MirrorStableId) -> list[NodeRecord]:
         return await self._off_main(_get_ancestors, self._dsn, node_id)
 
-    async def collect_subtree_node_ids(self, root_id: str) -> set[str]:
+    async def collect_subtree_node_ids(
+        self,
+        root_id: MirrorStableId,
+    ) -> set[MirrorStableId]:
         return await self._off_main(_collect_subtree_node_ids, self._dsn, root_id)
 
     async def build_deferred_preserved_set(
-        self, seen_ids: set[str], preserve_roots: set[str]
-    ) -> set[str]:
+        self,
+        seen_ids: set[MirrorStableId],
+        preserve_roots: set[MirrorStableId],
+    ) -> set[MirrorStableId]:
         return await self._off_main(
             _build_deferred_preserved_set, self._dsn, seen_ids, preserve_roots
         )
 
     async def apply_deferred_scan_removals(
-        self, preserved: set[str], mount_ids: set[str]
+        self,
+        preserved: set[MirrorStableId],
+        mount_ids: set[MirrorStableId],
     ) -> None:
         await self._off_main(
             _apply_deferred_scan_removals, self._dsn, preserved, mount_ids
@@ -692,7 +754,7 @@ class StorageService:
         self,
         cursor: int,
         max_size: int = _MAX_CHANGES_PER_PAGE,
-    ) -> tuple[list[tuple[str, bool, NodeRecord | None]], int, bool]:
+    ) -> tuple[list[tuple[MirrorStableId, bool, NodeRecord | None]], int, bool]:
         return await self._off_main(_get_changes_since, self._dsn, cursor, max_size)
 
     async def cleanup_dangling_nodes(self) -> int:
@@ -704,9 +766,10 @@ class StorageService:
 
 async def create_storage_service(
     database_url: str,
+    *,
     off_main: OffMainThreadService,
 ) -> StorageService:
-    storage = StorageService(database_url, off_main)
+    storage = StorageService(database_url, off_main=off_main)
     _L.info("initializing database: %s", database_url)
     await storage.ensure_schema()
     return storage

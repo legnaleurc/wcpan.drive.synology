@@ -11,17 +11,17 @@ Three focused service classes:
 
 from pathlib import Path
 
-from ...types import NodeRecord
-from ..api.files import list_folder_all, list_folder_all_by_path
+from ...types import MirrorStableId, NodeRecord
+from ..api.drive import SynologyDriveApi
 from ..api.types import SynologyFileInfo
 from ..lib.mounts import SERVER_ROOT_ID, MountRegistry, is_virtual, mount_name
 from ..types import (
-    SynologyApiRef,
-    SynologyIdRef,
+    SynologyChildRef,
+    SynologyFileId,
+    SynologyParentRef,
     SynologyPath,
     VirtualPath,
 )
-from .network import NetworkService
 from .storage import StorageService
 
 
@@ -38,48 +38,58 @@ class SynologyPathService:
     (handlers pull from app keys, services hold their own reference).
     """
 
-    def __init__(self, registry: MountRegistry) -> None:
+    def __init__(
+        self,
+        *,
+        registry: MountRegistry,
+        storage: StorageService,
+    ) -> None:
         self._registry = registry
+        self._storage = storage
 
     @property
     def mounts(self) -> dict[str, SynologyPath]:
         return self._registry.mounts
 
-    def synology_parent_ref(self, parent_id: str) -> SynologyApiRef:
-        """Translate ``parent_id`` into a Synology API reference (path or ``id:…``)."""
-        key = mount_name(parent_id)
+    async def synology_parent_ref(
+        self,
+        parent_node_id: MirrorStableId,
+    ) -> SynologyParentRef:
+        """Translate a mirror parent node ID into a Synology API parent ref."""
+        key = mount_name(parent_node_id)
         if key is not None:
             return self._registry.mounts[key]
-        return SynologyIdRef(f"id:{parent_id}")
+        return await self._resolve_mutable_id_ref(parent_node_id)
 
     async def list_children(
-        self, network: NetworkService, parent_id: str
+        self,
+        drive_api: SynologyDriveApi,
+        parent_node_id: MirrorStableId,
     ) -> list[SynologyFileInfo]:
-        """List folder children; mount virtual parents use path listing, else ``id:`` listing."""
-        mkey = mount_name(parent_id)
-        if mkey is not None:
-            return await list_folder_all_by_path(network, self._registry.mounts[mkey])
-        return await list_folder_all(network, parent_id)
+        """List children of a mirror parent node ID."""
+        folder_ref = await self.synology_parent_ref(parent_node_id)
+        return await drive_api.list_folder_all(folder_ref)
 
     async def find_child_by_name(
         self,
-        network: NetworkService,
-        parent_id: str,
+        drive_api: SynologyDriveApi,
+        parent_node_id: MirrorStableId,
         name: str,
-        *,
-        is_directory: bool | None,
     ) -> SynologyFileInfo | None:
-        """Return the first child with ``name``, optionally filtered by directory vs file."""
-        children = await self.list_children(network, parent_id)
-        for info in children:
-            if info["name"] != name:
-                continue
-            if is_directory is not None:
-                got_dir = info["type"] == "dir"
-                if got_dir != is_directory:
-                    continue
-            return info
-        return None
+        parent_ref = await self.synology_parent_ref(parent_node_id)
+        child_ref = SynologyChildRef(parent_ref=parent_ref, name=name)
+        return await drive_api.get_node_metadata(child_ref)
+
+    async def _resolve_mutable_id_ref(
+        self,
+        parent_node_id: MirrorStableId,
+    ) -> SynologyFileId:
+        record = await self._storage.get_node_by_id(parent_node_id)
+        if record is None:
+            raise ValueError(
+                f"No node found for non-mount parent_id: {parent_node_id!r}"
+            )
+        return SynologyFileId.from_mirror_mutable_id(record.mutable_id)
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +106,7 @@ class LocalPathService:
 
     def __init__(
         self,
+        *,
         storage: StorageService,
         mounts: dict[str, SynologyPath],
         local_paths: dict[str, str],
@@ -114,7 +125,7 @@ class LocalPathService:
             node_cache = {}
         else:
             ancestors = await self._storage.get_ancestors(record.parent_id)
-            node_cache = {a.node_id: a for a in ancestors}
+            node_cache = {a.id: a for a in ancestors}
 
         return _resolve_local_path(self._mounts, local_paths, record, node_cache)
 
@@ -127,10 +138,13 @@ class LocalPathService:
 class VirtualPathService:
     """Resolve client-facing virtual paths to directory node IDs."""
 
-    def __init__(self, storage: StorageService) -> None:
+    def __init__(self, *, storage: StorageService) -> None:
         self._storage = storage
 
-    async def resolve_to_directory_node_id(self, virtual_path: VirtualPath) -> str:
+    async def resolve_to_directory_node_id(
+        self,
+        virtual_path: VirtualPath,
+    ) -> MirrorStableId:
         """Resolve a server virtual path (``/`` = root ``_``) to a directory ``node_id``."""
         segments = _virtual_path_segments(virtual_path)
 

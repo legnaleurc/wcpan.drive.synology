@@ -13,20 +13,20 @@ from wcpan.drive.synology._lib import (
     node_record_from_dict,
     node_record_to_dict,
 )
-from wcpan.drive.synology.types import NodeRecord
+from wcpan.drive.synology.types import MirrorMutableId, MirrorStableId, NodeRecord
 
 
 _NOW = datetime(2024, 1, 1, tzinfo=UTC)
 
 
 def _make_record(
-    node_id: str = "file-id-001",
+    node_id: MirrorStableId = MirrorStableId("file-id-001"),
     name: str = "test.txt",
-    parent_id: str | None = "parent-id-001",
+    parent_id: MirrorStableId | None = MirrorStableId("parent-id-001"),
     is_directory: bool = False,
 ) -> NodeRecord:
     return NodeRecord(
-        node_id=node_id,
+        id=node_id,
         parent_id=parent_id,
         name=name,
         is_directory=is_directory,
@@ -40,13 +40,14 @@ def _make_record(
         width=0,
         height=0,
         ms_duration=0,
+        mutable_id=MirrorMutableId(str(node_id)),
     )
 
 
 class TestNodeFromRecord(TestCase):
     def test_id_is_file_id(self):
         # given
-        record = _make_record(node_id="synology-file-id-xyz")
+        record = _make_record(node_id=MirrorStableId("synology-file-id-xyz"))
         # when
         node = node_from_record(record)
         # then
@@ -54,7 +55,7 @@ class TestNodeFromRecord(TestCase):
 
     def test_parent_id_preserved(self):
         # given
-        record = _make_record(parent_id="parent-file-id-abc")
+        record = _make_record(parent_id=MirrorStableId("parent-file-id-abc"))
         # when
         node = node_from_record(record)
         # then
@@ -136,8 +137,10 @@ class TestNodeRecordRoundtrip(TestCase):
         d = node_record_to_dict(record)
         restored = node_record_from_dict(d)
         # then
-        self.assertEqual(restored.node_id, record.node_id)
+        self.assertEqual(restored.id, record.id)
         self.assertEqual(restored.parent_id, record.parent_id)
+        self.assertIsInstance(restored.id, str)
+        self.assertIsInstance(restored.parent_id, str)
         self.assertEqual(restored.name, record.name)
         self.assertEqual(restored.ctime, record.ctime)
         self.assertEqual(restored.mtime, record.mtime)

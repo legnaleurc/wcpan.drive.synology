@@ -16,7 +16,7 @@ from wcpan.drive.synology._server.services.storage import (
     cleanup_dangling_nodes,
     reset_change_history,
 )
-from wcpan.drive.synology.types import NodeRecord
+from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
 _NOW = datetime(2024, 1, 1, tzinfo=UTC)
@@ -34,7 +34,7 @@ def _make_node(
     height: int = 0,
 ) -> NodeRecord:
     return NodeRecord(
-        node_id=node_id,
+        id=node_id,
         parent_id=parent_id,
         name=name,
         is_directory=is_directory,
@@ -48,11 +48,12 @@ def _make_node(
         width=width,
         height=height,
         ms_duration=0,
+        mutable_id=MirrorMutableId(node_id),
     )
 
 
 def _make_storage(db_path: str, pool: ThreadPoolExecutor) -> StorageService:
-    return StorageService(db_path, OffMainThreadService(pool))
+    return StorageService(db_path, off_main=OffMainThreadService(pool=pool))
 
 
 class TestCleanupDanglingNodes(IsolatedAsyncioTestCase):

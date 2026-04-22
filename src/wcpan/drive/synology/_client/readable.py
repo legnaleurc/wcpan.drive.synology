@@ -1,6 +1,6 @@
 """ReadableFile that downloads via the wcpan.drive.synology server."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any, override
 
@@ -9,7 +9,13 @@ from wcpan.drive.core.types import Node, ReadableFile
 
 
 class ClientReadableFile(ReadableFile):
-    def __init__(self, session: ClientSession, server_url: str, node: Node) -> None:
+    def __init__(
+        self,
+        node: Node,
+        *,
+        session: ClientSession,
+        server_url: str,
+    ) -> None:
         self._session = session
         self._server_url = server_url.rstrip("/")
         self._node = node
@@ -56,7 +62,7 @@ class ClientReadableFile(ReadableFile):
         return self._node
 
     @asynccontextmanager
-    async def _download(self) -> AsyncIterator[ClientResponse]:
+    async def _download(self) -> AsyncGenerator[ClientResponse]:
         url = f"{self._server_url}/api/v1/nodes/{self._node.id}/download"
         headers: dict[str, str] = {}
         if self._offset > 0:

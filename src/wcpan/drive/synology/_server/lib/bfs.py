@@ -1,12 +1,16 @@
 import asyncio
+import os
 from collections.abc import Awaitable, Callable, Iterable
+
+
+_DEFAULT_CONCURRENCY = os.process_cpu_count() or 1
 
 
 async def parallel_bfs[T](
     initial: Iterable[T],
     visit: Callable[[T], Awaitable[list[T]]],
     *,
-    concurrency: int = 4,
+    concurrency: int = _DEFAULT_CONCURRENCY,
 ) -> None:
     """BFS with N concurrent workers.
 

@@ -8,7 +8,7 @@ _OFF_MAIN_TIMEOUT = 60.0  # seconds — crash if any DB op hangs this long
 
 
 class OffMainThreadService:
-    def __init__(self, pool: Executor) -> None:
+    def __init__(self, *, pool: Executor) -> None:
         self._pool = pool
 
     async def __call__[**A, R](

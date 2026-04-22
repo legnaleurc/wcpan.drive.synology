@@ -9,7 +9,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from .api.webhooks import create_webhook, delete_webhook, list_webhooks
+from .api import SynologyDriveApi, create_synology_drive_api
 from .handlers.changes import get_changes, get_cursor, get_root
 from .handlers.health import get_livez, get_readyz, put_null
 from .handlers.nodes import (
@@ -31,25 +31,24 @@ from .keys import (
     CHANGE_SERVICE_KEY,
     CONFIG_KEY,
     MOUNT_REGISTRY_KEY,
-    NETWORK_KEY,
     OFF_MAIN_KEY,
     READY_KEY,
     STORAGE_KEY,
+    SYNOLOGY_DRIVE_API_KEY,
     SYNOLOGY_PATH_KEY,
-    UPLOAD_SESSIONS_KEY,
+    UPLOAD_SERVICE_KEY,
     WEBHOOK_QUEUE_KEY,
     WRITE_QUEUE_KEY,
 )
 from .lib.mounts import MountRegistry, create_mount_registry
-from .services.network import NetworkService, create_network_service
 from .services.off_main import OffMainThreadService
 from .services.paths import SynologyPathService
 from .services.scan import StartupScanService
 from .services.storage import StorageService, create_storage_service
 from .services.sync import NodeSyncService
-from .services.upload import UploadSessionService, create_upload_session_service
+from .services.upload import create_upload_service
 from .services.webhook import WebhookService
-from .types import ServerConfig, WriteQueue
+from .types import MetadataQueue, ServerConfig, WriteQueue
 from .workers import (
     METADATA_WORKER_COUNT,
     checkpoint_worker,
@@ -86,18 +85,17 @@ async def _background[T](
 
 @asynccontextmanager
 async def _managed_webhook(
-    network: NetworkService, config: ServerConfig
+    drive_api: SynologyDriveApi, config: ServerConfig
 ) -> AsyncGenerator[None, None]:
-    stale = await list_webhooks(network, config.webhook_app_id)
+    stale = await drive_api.list_webhooks(config.webhook_app_id)
     for hook in stale:
         try:
-            await delete_webhook(
-                network, str(hook["webhook_id"]), config.webhook_app_id
+            await drive_api.delete_webhook(
+                str(hook["webhook_id"]), config.webhook_app_id
             )
         except Exception:
             _L.warning("Failed to remove stale webhook %s", hook.get("webhook_id"))
-    webhook_id = await create_webhook(
-        network,
+    webhook_id = await drive_api.create_webhook(
         f"{config.public_url}/api/v1/synology-webhook",
         config.webhook_app_id,
     )
@@ -106,7 +104,7 @@ async def _managed_webhook(
         yield
     finally:
         try:
-            await delete_webhook(network, webhook_id, config.webhook_app_id)
+            await drive_api.delete_webhook(webhook_id, config.webhook_app_id)
             _L.info("Webhook unregistered: id=%s", webhook_id)
         except Exception:
             _L.warning("Failed to unregister webhook id=%s", webhook_id)
@@ -115,20 +113,20 @@ async def _managed_webhook(
 @asynccontextmanager
 async def managed_off_main() -> AsyncGenerator[OffMainThreadService, None]:
     with _managed_pool() as pool:
-        off_main = OffMainThreadService(pool)
+        off_main = OffMainThreadService(pool=pool)
         yield off_main
 
 
 @asynccontextmanager
 async def _managed_background_tasks(
     app: web.Application,
-    network: NetworkService,
+    drive_api: SynologyDriveApi,
     storage: StorageService,
-    off_main: OffMainThreadService,
     write_queue: WriteQueue,
     mount_registry: MountRegistry,
+    node_sync: NodeSyncService,
+    metadata_queue: MetadataQueue,
 ) -> AsyncGenerator[None, None]:
-    config: ServerConfig = app[CONFIG_KEY]
     scan_done_event = asyncio.Event()
     webhook_queue = create_webhook_queue()
     app[READY_KEY] = False
@@ -139,26 +137,15 @@ async def _managed_background_tasks(
         await webhook_queue.join()
         app[READY_KEY] = True
 
-    metadata_queue = create_metadata_queue()
-    node_sync = NodeSyncService(
-        storage=storage,
-        write_queue=write_queue,
-        off_main=off_main,
-        mounts=config.mounts,
-        local_paths=config.local_paths,
-        metadata_queue=metadata_queue,
-    )
-    app[CHANGE_SERVICE_KEY] = node_sync
-
     startup_scan = StartupScanService(
-        network=network,
+        drive_api=drive_api,
         storage=storage,
         syno_paths=app[SYNOLOGY_PATH_KEY],
         node_sync=node_sync,
     )
 
     webhook_service = WebhookService(
-        network=network,
+        drive_api=drive_api,
         storage=storage,
         node_sync=node_sync,
         syno_paths=app[SYNOLOGY_PATH_KEY],
@@ -196,48 +183,61 @@ async def _managed_background_tasks(
         yield
 
 
-@asynccontextmanager
-async def _managed_upload_service(
-    config: ServerConfig,
-) -> AsyncGenerator[UploadSessionService, None]:
-    tmp_dir = Path(config.upload_tmp_dir) if config.upload_tmp_dir else None
-    with create_upload_session_service(tmp_dir=tmp_dir) as service:
-        yield service
-
-
 async def _app_lifecycle(app: web.Application) -> AsyncGenerator[None, None]:
     config: ServerConfig = app[CONFIG_KEY]
     async with AsyncExitStack() as stack:
-        network = await stack.enter_async_context(
-            create_network_service(
-                base_url=config.synology_url,
-                username=config.username,
-                password=config.password,
-                otp_code=config.otp_code,
-            )
+        drive_api: SynologyDriveApi = await stack.enter_async_context(
+            create_synology_drive_api(config)
         )
-        app[NETWORK_KEY] = network
-
-        mount_registry = await create_mount_registry(network, config.mounts)
-        app[MOUNT_REGISTRY_KEY] = mount_registry
-        app[SYNOLOGY_PATH_KEY] = SynologyPathService(mount_registry)
-
         off_main = await stack.enter_async_context(managed_off_main())
-        storage = await create_storage_service(config.database_url, off_main)
+        storage = await create_storage_service(config.database_url, off_main=off_main)
         write_queue = create_write_queue()
         app[STORAGE_KEY] = storage
         app[OFF_MAIN_KEY] = off_main
         app[WRITE_QUEUE_KEY] = write_queue
+        app[SYNOLOGY_DRIVE_API_KEY] = drive_api
 
-        app[UPLOAD_SESSIONS_KEY] = await stack.enter_async_context(
-            _managed_upload_service(config)
+        mount_registry = await create_mount_registry(
+            config.mounts,
+            drive_api=drive_api,
+        )
+        app[MOUNT_REGISTRY_KEY] = mount_registry
+        app[SYNOLOGY_PATH_KEY] = SynologyPathService(
+            registry=mount_registry,
+            storage=storage,
         )
 
-        await stack.enter_async_context(_managed_webhook(network, config))
+        await stack.enter_async_context(_managed_webhook(drive_api, config))
+
+        metadata_queue = create_metadata_queue()
+        node_sync = NodeSyncService(
+            storage=storage,
+            write_queue=write_queue,
+            off_main=off_main,
+            mounts=config.mounts,
+            local_paths=config.local_paths,
+            metadata_queue=metadata_queue,
+        )
+        app[CHANGE_SERVICE_KEY] = node_sync
+        tmp_dir = Path(config.upload_tmp_dir) if config.upload_tmp_dir else None
+        app[UPLOAD_SERVICE_KEY] = stack.enter_context(
+            create_upload_service(
+                tmp_dir=tmp_dir,
+                node_sync=node_sync,
+                drive_api=drive_api,
+                syno_paths=app[SYNOLOGY_PATH_KEY],
+            )
+        )
 
         await stack.enter_async_context(
             _managed_background_tasks(
-                app, network, storage, off_main, write_queue, mount_registry
+                app,
+                drive_api,
+                storage,
+                write_queue,
+                mount_registry,
+                node_sync,
+                metadata_queue,
             )
         )
 
