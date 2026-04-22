@@ -1,0 +1,1616 @@
+openapi: 3.1.0
+info:
+  title: Synology WebStation SynologyDrive API
+  version: 1.0.0
+  summary: Self-contained reference for Synology Drive APIs exposed through DSM WebStation entry.cgi
+  description: |
+    This spec documents the WebStation-facing Synology Drive namespaces only:
+
+    - SYNO.SynologyDrive.Files
+    - SYNO.SynologyDrive.Tasks
+    - SYNO.SynologyDrive.Webhooks
+
+    Authentication is assumed to be an existing DSM WebAPI session id passed as `_sid`.
+
+    Verification legend:
+    - Files transport and method availability: live-verified
+    - Tasks schemas and conflict payloads: live-verified
+    - Webhooks namespace and method availability: live-verified
+    - Webhooks create/get/delete transport: live-verified with JSON-encoded query parameters
+    - Webhooks field schemas: taken from the exported Synology Drive schema
+
+servers:
+  - url: https://dsm.example.test
+    description: Placeholder DSM WebStation base URL
+
+tags:
+  - name: Files
+  - name: Tasks
+  - name: Webhooks
+
+paths:
+  /webapi/entry.cgi#files-get:
+    post:
+      tags: [Files]
+      summary: Get one file or folder
+      description: |
+        Documentation-only pseudo-endpoint for:
+
+        - `api=SYNO.SynologyDrive.Files`
+        - `version=11`
+        - `method=get`
+
+        Working transport is query-string RPC with JSON-encoded parameter values.
+      operationId: driveFilesGet
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/FilesGetForm"
+            examples:
+              byId:
+                value:
+                  api: SYNO.SynologyDrive.Files
+                  version: "11"
+                  method: get
+                  _sid: <sid>
+                  path: id:<file-id>
+              byPath:
+                value:
+                  api: SYNO.SynologyDrive.Files
+                  version: "11"
+                  method: get
+                  _sid: <sid>
+                  path: /team-folders/<share>/folder/file.txt
+      responses:
+        "200":
+          description: File metadata
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FileInfoResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
+
+  /webapi/entry.cgi#files-list:
+    post:
+      tags: [Files]
+      summary: List files in a folder
+      description: |
+        Documentation-only pseudo-endpoint for:
+
+        - `api=SYNO.SynologyDrive.Files`
+        - `version=11`
+        - `method=list`
+
+        Working transport is query-string RPC with JSON-encoded parameter values.
+
+        Array/object fields such as `filter` and `extra` may need to be JSON-stringified
+        depending on the client implementation. Array fields on this WebStation surface
+        should not be sent as repeated keys.
+      operationId: driveFilesList
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/FilesListForm"
+            examples:
+              basic:
+                value:
+                  api: SYNO.SynologyDrive.Files
+                  version: "11"
+                  method: list
+                  _sid: <sid>
+                  path: id:<folder-id>
+                  sort_by: name
+                  sort_direction: asc
+                  offset: "0"
+                  limit: "100"
+      responses:
+        "200":
+          description: Folder listing
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FileListResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
+
+  /webapi/entry.cgi#files-search:
+    post:
+      tags: [Files]
+      summary: Search files
+      description: |
+        Documentation-only pseudo-endpoint for:
+
+        - `api=SYNO.SynologyDrive.Files`
+        - `version=11`
+        - `method=search`
+
+        Method availability was live-verified on WebStation.
+      operationId: driveFilesSearch
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/FilesGenericRpcForm"
+            examples:
+              generic:
+                value:
+                  api: SYNO.SynologyDrive.Files
+                  version: "11"
+                  method: search
+                  _sid: <sid>
+      responses:
+        "200":
+          description: Search response
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - $ref: "#/components/schemas/ErrorResponse"
+
+  /webapi/entry.cgi#files-create:
+    post:
+      tags: [Files]
+      summary: Create a folder or a small file
+      description: |
+        Documentation-only pseudo-endpoint for:
+
+        - `api=SYNO.SynologyDrive.Files`
+        - `version=11`
+        - `method=create`
+
+        Working transport is query-string RPC with JSON-encoded parameter values.
+      operationId: driveFilesCreate
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/FilesCreateForm"
+            examples:
+              folder:
+                value:
+                  api: SYNO.SynologyDrive.Files
+                  version: "11"
+                  method: create
+                  _sid: <sid>
+                  type: folder
+                  path: id:<parent-id>/new-folder
+                  conflict_action: stop
+              smallFile:
+                value:
+                  api: SYNO.SynologyDrive.Files
+                  version: "11"
+                  method: create
+                  _sid: <sid>
+                  type: file
+                  path: id:<parent-id>/hello.txt
+                  file_content: SGVsbG8=
+      responses:
+        "200":
+          description: Created file metadata
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FileInfoResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
+
+  /webapi/entry.cgi#files-update:
+    post:
+      tags: [Files]
+      summary: Rename or update file metadata
+      description: |
+        Documentation-only pseudo-endpoint for:
+
+        - `api=SYNO.SynologyDrive.Files`
+        - `version=11`
+        - `method=update`
+
+        Working transport is query-string RPC with JSON-encoded parameter values.
+      operationId: driveFilesUpdate
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/FilesUpdateForm"
+            examples:
+              rename:
+                value:
+                  api: SYNO.SynologyDrive.Files
+                  version: "11"
+                  method: update
+                  _sid: <sid>
+                  path: id:<file-id>
+                  name: renamed.txt
+      responses:
+        "200":
+          description: Updated file metadata
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FileInfoResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
+
+  /webapi/entry.cgi#files-move:
+    post:
+      tags: [Files]
+      summary: Move files or folders
+      description: |
+        Documentation-only pseudo-endpoint for:
+
+        - `api=SYNO.SynologyDrive.Files`
+        - `version=11`
+        - `method=move`
+
+        Working transport is query-string RPC with JSON-encoded parameter values.
+
+        Important WebStation rule:
+        - `files` must be one JSON-stringified array field such as `["id:<file-id>"]`
+
+        The immediate response only queues an async task. Use `SYNO.SynologyDrive.Tasks.get`
+        to determine final success or conflict.
+      operationId: driveFilesMove
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/FilesMoveForm"
+            examples:
+              stopOnConflict:
+                value:
+                  api: SYNO.SynologyDrive.Files
+                  version: "11"
+                  method: move
+                  _sid: <sid>
+                  to_parent_folder: id:<folder-id>
+                  conflict_action: stop
+                  files: "[\"id:<file-id>\"]"
+      responses:
+        "200":
+          description: Async move request accepted
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/AsyncTaskQueuedResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                queued:
+                  value:
+                    success: true
+                    data:
+                      async_task_id: task-<n>
+
+  /webapi/entry.cgi#files-delete:
+    post:
+      tags: [Files]
+      summary: Delete files or folders
+      description: |
+        Documentation-only pseudo-endpoint for:
+
+        - `api=SYNO.SynologyDrive.Files`
+        - `version=11`
+        - `method=delete`
+
+        Working transport is query-string RPC with JSON-encoded parameter values.
+
+        Important WebStation rule:
+        - `files` must be one JSON-stringified array field such as `["id:<file-id>"]`
+      operationId: driveFilesDelete
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/FilesDeleteForm"
+            examples:
+              recycle:
+                value:
+                  api: SYNO.SynologyDrive.Files
+                  version: "11"
+                  method: delete
+                  _sid: <sid>
+                  permanent: "false"
+                  files: "[\"id:<file-id>\"]"
+      responses:
+        "200":
+          description: Delete request result
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - $ref: "#/components/schemas/ErrorResponse"
+
+  /webapi/entry.cgi#files-download:
+    post:
+      tags: [Files]
+      summary: Download files
+      description: |
+        Documentation-only pseudo-endpoint for:
+
+        - `api=SYNO.SynologyDrive.Files`
+        - `version=11`
+        - `method=download`
+
+        Working transport is query-string RPC with JSON-encoded parameter values.
+
+        Important WebStation rule:
+        - `files` must be one JSON-stringified array field such as `["id:<file-id>"]`
+      operationId: driveFilesDownload
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/FilesDownloadForm"
+            examples:
+              single:
+                value:
+                  api: SYNO.SynologyDrive.Files
+                  version: "11"
+                  method: download
+                  _sid: <sid>
+                  files: "[\"id:<file-id>\"]"
+                  force_download: "true"
+      responses:
+        "200":
+          description: Download validation response or binary file stream
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - $ref: "#/components/schemas/ErrorResponse"
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            application/zip:
+              schema:
+                type: string
+                format: binary
+
+  /webapi/entry.cgi:
+    post:
+      tags: [Files]
+      summary: Upload a file
+      description: |
+        Live-verified multipart transport for:
+
+        - `api=SYNO.SynologyDrive.Files`
+        - `version=11`
+        - `method=upload`
+
+        Working pattern:
+        - `POST /webapi/entry.cgi?api=SYNO.SynologyDrive.Files&version=11&method=upload&_sid=<sid>`
+        - `Content-Type: multipart/form-data`
+
+        Observed working `path` form:
+        - `id:<parent-id>/<basename>`
+      operationId: driveFilesUpload
+      parameters:
+        - name: api
+          in: query
+          required: true
+          schema:
+            type: string
+            const: SYNO.SynologyDrive.Files
+        - name: version
+          in: query
+          required: true
+          schema:
+            type: integer
+            const: 11
+        - name: method
+          in: query
+          required: true
+          schema:
+            type: string
+            const: upload
+        - name: _sid
+          in: query
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/FilesUploadMultipart"
+            examples:
+              basic:
+                value:
+                  path: id:<parent-id>/report.pdf
+                  type: file
+                  conflict_action: stop
+      responses:
+        "200":
+          description: Uploaded file metadata
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FileInfoResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
+
+  /webapi/entry.cgi#tasks-list:
+    get:
+      tags: [Tasks]
+      summary: List Synology Drive tasks
+      description: |
+        Documentation-only pseudo-endpoint for:
+
+        - `api=SYNO.SynologyDrive.Tasks`
+        - `version=1`
+        - `method=list`
+      operationId: driveTasksList
+      parameters:
+        - name: api
+          in: query
+          required: true
+          schema:
+            type: string
+            const: SYNO.SynologyDrive.Tasks
+        - name: version
+          in: query
+          required: true
+          schema:
+            type: integer
+            const: 1
+        - name: method
+          in: query
+          required: true
+          schema:
+            type: string
+            const: list
+        - name: _sid
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Task listing
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/DriveTaskListResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
+
+  /webapi/entry.cgi#tasks-get:
+    get:
+      tags: [Tasks]
+      summary: Get one Synology Drive task
+      description: |
+        Documentation-only pseudo-endpoint for:
+
+        - `api=SYNO.SynologyDrive.Tasks`
+        - `version=1`
+        - `method=get`
+      operationId: driveTasksGet
+      parameters:
+        - name: api
+          in: query
+          required: true
+          schema:
+            type: string
+            const: SYNO.SynologyDrive.Tasks
+        - name: version
+          in: query
+          required: true
+          schema:
+            type: integer
+            const: 1
+        - name: method
+          in: query
+          required: true
+          schema:
+            type: string
+            const: get
+        - name: task_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: _sid
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Task detail
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/DriveTaskGetResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidTask:
+                  value:
+                    success: false
+                    error:
+                      code: 401
+                      errors:
+                        message: invalid task id
+                conflict:
+                  value:
+                    success: true
+                    data:
+                      task_id: task-<n>
+                      status: finished
+                      progress: 100
+                      result:
+                        action: move
+                        errors:
+                          - code: 1022
+                            message: file operation is stopped
+                            context:
+                              file_type: file
+                              name: sample.txt
+                              path: /folder/sample.txt
+                        processed_size: 0
+                        total_size: 123
+
+  /webapi/entry.cgi#webhooks-create:
+    post:
+      tags: [Webhooks]
+      summary: Create a webhook
+      description: |
+        Documentation-only pseudo-endpoint for:
+
+        - `api=SYNO.SynologyDrive.Webhooks`
+        - `version=2`
+        - `method=create`
+
+        Live WebStation transport uses query-string RPC with JSON-encoded parameter values.
+      operationId: driveWebhooksCreate
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/WebhooksCreateForm"
+            examples:
+              urlWebhook:
+                value:
+                  api: SYNO.SynologyDrive.Webhooks
+                  version: "2"
+                  method: create
+                  _sid: <sid>
+                  type: url
+                  app_id: <app-id>
+                  url: https://example.invalid/webhook
+      responses:
+        "200":
+          description: Created webhook
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/WebhookInfoResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
+
+  /webapi/entry.cgi#webhooks-get:
+    post:
+      tags: [Webhooks]
+      summary: Get a webhook
+      description: |
+        Documentation-only pseudo-endpoint for:
+
+        - `api=SYNO.SynologyDrive.Webhooks`
+        - `version=2`
+        - `method=get`
+
+        Live WebStation transport uses query-string RPC with JSON-encoded parameter values.
+      operationId: driveWebhooksGet
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/WebhooksGetForm"
+      responses:
+        "200":
+          description: Webhook metadata
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/WebhookInfoResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
+
+  /webapi/entry.cgi#webhooks-update:
+    post:
+      tags: [Webhooks]
+      summary: Update a webhook
+      description: |
+        Documentation-only pseudo-endpoint for:
+
+        - `api=SYNO.SynologyDrive.Webhooks`
+        - `version=2`
+        - `method=update`
+
+        Live WebStation transport uses query-string RPC with JSON-encoded parameter values.
+      operationId: driveWebhooksUpdate
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/WebhooksUpdateForm"
+      responses:
+        "200":
+          description: Updated webhook
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/WebhookInfoResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
+
+  /webapi/entry.cgi#webhooks-delete:
+    post:
+      tags: [Webhooks]
+      summary: Delete a webhook
+      description: |
+        Documentation-only pseudo-endpoint for:
+
+        - `api=SYNO.SynologyDrive.Webhooks`
+        - `version=2`
+        - `method=delete`
+
+        Live WebStation transport uses query-string RPC with JSON-encoded parameter values.
+      operationId: driveWebhooksDelete
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/WebhooksDeleteForm"
+      responses:
+        "200":
+          description: Delete result
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - $ref: "#/components/schemas/ErrorResponse"
+
+  /webapi/entry.cgi#webhooks-list:
+    post:
+      tags: [Webhooks]
+      summary: List webhooks for an app id
+      description: |
+        Documentation-only pseudo-endpoint for:
+
+        - `api=SYNO.SynologyDrive.Webhooks`
+        - `version=2`
+        - `method=list`
+
+        Live WebStation transport uses query-string RPC with JSON-encoded parameter values.
+      operationId: driveWebhooksList
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/WebhooksListForm"
+      responses:
+        "200":
+          description: Webhook list
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/WebhookListResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    SuccessEnvelope:
+      type: object
+      required: [success]
+      properties:
+        success:
+          type: boolean
+          const: true
+        data:
+          type: object
+          additionalProperties: true
+
+    ErrorResponse:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          const: false
+        error:
+          type: object
+          required: [code]
+          properties:
+            code:
+              type: integer
+            errors:
+              oneOf:
+                - type: object
+                  additionalProperties: true
+                - type: array
+                  items:
+                    type: object
+                    additionalProperties: true
+
+    FilesGenericRpcForm:
+      type: object
+      required: [api, version, method, _sid]
+      properties:
+        api:
+          type: string
+          const: SYNO.SynologyDrive.Files
+        version:
+          oneOf:
+            - type: string
+              const: "11"
+            - type: integer
+              const: 11
+        method:
+          type: string
+        _sid:
+          type: string
+
+    FilesGetForm:
+      allOf:
+        - $ref: "#/components/schemas/FilesGenericRpcForm"
+        - type: object
+          required: [path]
+          properties:
+            method:
+              type: string
+              const: get
+            path:
+              type: string
+              description: Accepted path identifier. Observed forms include `link:<permanent_link>`, `id:<file_id>`, `id:<file_id>/<basename>`, `/mydrive/<relative-path>`, `/team-folders/<team-folder-name>/<relative-path>`, `/views/<view_id>/<relative-path>`, and `/volumes/<absolute-path>`.
+
+    FilesListFilter:
+      type: object
+      properties:
+        extensions:
+          type: array
+          items:
+            type: string
+        type:
+          type: array
+          items:
+            type: string
+        label_id:
+          type: string
+        starred:
+          type: boolean
+
+    FilesListForm:
+      allOf:
+        - $ref: "#/components/schemas/FilesGenericRpcForm"
+        - type: object
+          required: [path]
+          properties:
+            method:
+              type: string
+              const: list
+            path:
+              type: string
+              description: Accepted folder path identifier. Observed forms include `link:<permanent_link>`, `id:<file_id>`, `id:<file_id>/<basename>`, `/mydrive/<relative-path>`, `/team-folders/<team-folder-name>/<relative-path>`, `/views/<view_id>/<relative-path>`, and `/volumes/<absolute-path>`.
+            sort_by:
+              type: string
+              default: name
+            sort_direction:
+              type: string
+              enum: [asc, desc]
+              default: asc
+            offset:
+              type: integer
+              minimum: 0
+              default: 0
+            limit:
+              type: integer
+              minimum: 0
+              default: 0
+            filter:
+              oneOf:
+                - $ref: "#/components/schemas/FilesListFilter"
+                - type: string
+                  description: JSON-stringified filter object
+            extra:
+              oneOf:
+                - type: array
+                  items:
+                    type: string
+                    enum: [sync_to_device]
+                - type: string
+                  description: JSON-stringified extra array
+
+    FilesCreateForm:
+      allOf:
+        - $ref: "#/components/schemas/FilesGenericRpcForm"
+        - type: object
+          required: [type, path]
+          properties:
+            method:
+              type: string
+              const: create
+            type:
+              type: string
+              enum: [file, folder]
+            path:
+              type: string
+              description: Accepted path identifier. Observed forms include `link:<permanent_link>`, `id:<file_id>`, `id:<file_id>/<basename>`, `/mydrive/<relative-path>`, `/team-folders/<team-folder-name>/<relative-path>`, `/views/<view_id>/<relative-path>`, and `/volumes/<absolute-path>`.
+            conflict_action:
+              type: string
+              enum: [overwrite, autorename, stop]
+              default: stop
+            mute:
+              type: boolean
+            permanent_link:
+              type: string
+            encrypted:
+              type: boolean
+            removed:
+              type: boolean
+            file_content:
+              type: string
+              description: Base64 encoded file content. Intended for small files only.
+            labels:
+              oneOf:
+                - type: array
+                  items:
+                    type: string
+                - type: string
+                  description: JSON-stringified labels array
+            modified_time:
+              type: integer
+            access_time:
+              type: integer
+            created_time:
+              type: integer
+
+    FilesUpdateForm:
+      allOf:
+        - $ref: "#/components/schemas/FilesGenericRpcForm"
+        - type: object
+          required: [path]
+          properties:
+            method:
+              type: string
+              const: update
+            path:
+              type: string
+              description: Accepted path identifier. Observed forms include `link:<permanent_link>`, `id:<file_id>`, `id:<file_id>/<basename>`, `/mydrive/<relative-path>`, `/team-folders/<team-folder-name>/<relative-path>`, `/views/<view_id>/<relative-path>`, and `/volumes/<absolute-path>`.
+            mute:
+              type: boolean
+            encrypted:
+              type: boolean
+            removed:
+              type: boolean
+            starred:
+              oneOf:
+                - type: boolean
+                - type: string
+                  description: JSON-stringified star action payload
+                - type: array
+                  items:
+                    type: object
+                    additionalProperties: true
+            labels:
+              oneOf:
+                - type: array
+                  items:
+                    oneOf:
+                      - type: string
+                      - type: object
+                        additionalProperties: true
+                - type: string
+                  description: JSON-stringified labels payload
+            modified_time:
+              type: integer
+            created_time:
+              type: integer
+            access_time:
+              type: integer
+            name:
+              type: string
+
+    FilesMoveForm:
+      allOf:
+        - $ref: "#/components/schemas/FilesGenericRpcForm"
+        - type: object
+          required: [to_parent_folder, files]
+          properties:
+            method:
+              type: string
+              const: move
+            dry_run:
+              type: boolean
+            conflict_action:
+              type: string
+              enum: [overwrite, autorename, skip, stop, version]
+              default: autorename
+            to_parent_folder:
+              type: string
+            files:
+              oneOf:
+                - type: string
+                  description: JSON-stringified array such as `["id:<file-id>"]`
+                - type: array
+                  items:
+                    type: string
+
+    FilesDeleteForm:
+      allOf:
+        - $ref: "#/components/schemas/FilesGenericRpcForm"
+        - type: object
+          required: [files]
+          properties:
+            method:
+              type: string
+              const: delete
+            permanent:
+              type: boolean
+              default: false
+            files:
+              oneOf:
+                - type: string
+                  description: JSON-stringified array such as `["id:<file-id>"]`
+                - type: array
+                  items:
+                    type: string
+
+    FilesDownloadForm:
+      allOf:
+        - $ref: "#/components/schemas/FilesGenericRpcForm"
+        - type: object
+          required: [files]
+          properties:
+            method:
+              type: string
+              const: download
+            dry_run:
+              type: boolean
+            decrypt:
+              oneOf:
+                - type: object
+                  additionalProperties: true
+                - type: string
+                  description: JSON-stringified decrypt payload
+            force_download:
+              type: boolean
+            archive_name:
+              type: string
+              default: download
+            files:
+              oneOf:
+                - type: string
+                  description: JSON-stringified array such as `["id:<file-id>"]`
+                - type: array
+                  items:
+                    type: string
+
+    FilesUploadMultipart:
+      type: object
+      required: [file, path]
+      properties:
+        file:
+          type: string
+          format: binary
+        conflict_action:
+          type: string
+          enum: [overwrite, autorename, stop, version]
+        type:
+          type: string
+          enum: [file, folder]
+        mute:
+          type: boolean
+        encrypted:
+          type: boolean
+        starred:
+          oneOf:
+            - type: boolean
+            - type: string
+        labels:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                oneOf:
+                  - type: string
+                  - type: object
+                    additionalProperties: true
+        modified_time:
+          type: integer
+        created_time:
+          type: integer
+        access_time:
+          type: integer
+        path:
+          type: string
+          description: Accepted upload path identifier. Observed forms include `link:<permanent_link>`, `id:<file_id>`, `id:<file_id>/<basename>`, `/mydrive/<relative-path>`, `/team-folders/<team-folder-name>/<relative-path>`, `/views/<view_id>/<relative-path>`, and `/volumes/<absolute-path>`.
+
+    AsyncTaskQueuedResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          const: true
+        data:
+          type: object
+          required: [async_task_id]
+          properties:
+            async_task_id:
+              type: string
+
+    MemberInfo:
+      type: object
+      properties:
+        uid:
+          type: integer
+        name:
+          type: string
+        nickname:
+          type: string
+        display_name:
+          type: string
+
+    PermissionInfo:
+      type: object
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+        nickname:
+          type: string
+        display_name:
+          type: string
+        role:
+          type: string
+        inherited:
+          type: boolean
+        permission_id:
+          type: string
+
+    LabelInfo:
+      type: object
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+        label_id:
+          type: string
+        color:
+          type: string
+
+    ImageMetadata:
+      type: object
+      additionalProperties: true
+
+    NodeLocking:
+      type: object
+      properties:
+        is_locked:
+          type: boolean
+
+    Capabilities:
+      type: object
+      properties:
+        can_comment:
+          type: boolean
+        can_delete:
+          type: boolean
+        can_download:
+          type: boolean
+        can_encrypt:
+          type: boolean
+        can_organize:
+          type: boolean
+        can_preview:
+          type: boolean
+        can_read:
+          type: boolean
+        can_rename:
+          type: boolean
+        can_share:
+          type: boolean
+        can_sync:
+          type: boolean
+        can_write:
+          type: boolean
+
+    FileInfo:
+      type: object
+      required:
+        - watermark_version
+        - transient
+        - dsm_path
+        - adv_shared
+        - enable_watermark
+        - force_watermark_download
+        - support_remote
+        - disable_download
+        - app_properties
+        - revisions
+        - content_snippet
+        - hash
+        - permanent_link
+        - owner
+        - shared_with
+        - sync_to_device
+        - shared
+        - starred
+        - encrypted
+        - removed
+        - max_id
+        - change_id
+        - sync_id
+        - version_id
+        - capabilities
+        - size
+        - change_time
+        - modified_time
+        - access_time
+        - created_time
+        - parent_id
+        - content_type
+        - type
+        - name
+        - display_path
+        - path
+        - file_id
+      properties:
+        uploaded_size:
+          type: integer
+          format: int64
+          minimum: 0
+        watermark_version:
+          type: integer
+          format: int64
+          minimum: 0
+        transient:
+          type: boolean
+        dsm_path:
+          type: string
+        adv_shared:
+          type: boolean
+        enable_watermark:
+          type: boolean
+        force_watermark_download:
+          type: boolean
+        support_remote:
+          type: boolean
+        in_disconnected_cold_tier:
+          type: boolean
+        disable_download:
+          type: boolean
+        last_modified_by:
+          $ref: "#/components/schemas/MemberInfo"
+        app_properties:
+          type: object
+          additionalProperties: true
+        properties:
+          type: object
+          additionalProperties: true
+        image_metadata:
+          $ref: "#/components/schemas/ImageMetadata"
+        node_locking:
+          $ref: "#/components/schemas/NodeLocking"
+        revisions:
+          type: integer
+          minimum: 0
+        content_snippet:
+          type: string
+        hash:
+          type: string
+        labels:
+          type: array
+          items:
+            $ref: "#/components/schemas/LabelInfo"
+        permanent_link:
+          type: string
+        owner:
+          $ref: "#/components/schemas/MemberInfo"
+        shared_with:
+          type: array
+          items:
+            $ref: "#/components/schemas/PermissionInfo"
+        sync_to_device:
+          type: boolean
+        shared:
+          type: boolean
+        starred:
+          type: boolean
+        encrypted:
+          type: boolean
+        removed:
+          type: boolean
+        max_id:
+          type: integer
+          format: int64
+          minimum: 0
+        change_id:
+          type: integer
+          format: int64
+          minimum: 0
+        sync_id:
+          type: integer
+          format: int64
+          minimum: 0
+        version_id:
+          oneOf:
+            - type: integer
+              format: int64
+              minimum: 0
+            - type: string
+        capabilities:
+          $ref: "#/components/schemas/Capabilities"
+        size:
+          type: integer
+          format: int64
+          minimum: 0
+        change_time:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Observed as a Drive sync/change timestamp.
+        modified_time:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Observed as the content modification timestamp.
+        access_time:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Observed as a Drive record timestamp, not a reliable filesystem atime.
+        created_time:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Observed as a Drive record timestamp, not a reliable filesystem birth time.
+        parent_id:
+          type: string
+        content_type:
+          type: string
+          enum: [dir, document, image, audio, video, file]
+          description: Preview/media classification; a normal file may report `image` while `type` remains `file`.
+        type:
+          type: string
+          enum: [file, dir]
+        name:
+          type: string
+        display_path:
+          type: string
+          description: Full accessible Drive path such as `/team-folders/<share>/<path>`.
+        path:
+          type: string
+          description: Path relative to the requested parent or current navigation root.
+        file_id:
+          type: string
+
+    FileInfoResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          const: true
+        data:
+          $ref: "#/components/schemas/FileInfo"
+
+    FileListResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          const: true
+        data:
+          type: object
+          required: [total, items]
+          properties:
+            total:
+              type: integer
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/FileInfo"
+
+    DriveTaskFileRef:
+      type: object
+      properties:
+        path:
+          type: string
+
+    DriveTaskTarget:
+      type: object
+      properties:
+        file_id:
+          type: string
+        parent_id:
+          type: string
+        file_type:
+          type: string
+          enum: [file, dir]
+        name:
+          type: string
+        path:
+          type: string
+
+    DriveTaskError:
+      type: object
+      properties:
+        code:
+          type: integer
+        message:
+          type: string
+        context:
+          type: object
+          additionalProperties: true
+
+    DriveTaskResult:
+      type: object
+      properties:
+        action:
+          type: string
+        errors:
+          oneOf:
+            - type: "null"
+            - type: array
+              items:
+                $ref: "#/components/schemas/DriveTaskError"
+        processed_size:
+          type: integer
+        total_size:
+          type: integer
+        names:
+          type: array
+          items:
+            type: string
+        params:
+          type: object
+          properties:
+            files:
+              type: array
+              items:
+                $ref: "#/components/schemas/DriveTaskFileRef"
+        targets:
+          type: array
+          items:
+            $ref: "#/components/schemas/DriveTaskTarget"
+
+    DriveTask:
+      type: object
+      required: [task_id, status, progress]
+      properties:
+        task_id:
+          type: string
+        status:
+          type: string
+        progress:
+          type: integer
+        result:
+          $ref: "#/components/schemas/DriveTaskResult"
+
+    DriveTaskListResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          const: true
+        data:
+          type: object
+          required: [items, total]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/DriveTask"
+            total:
+              type: integer
+
+    DriveTaskGetResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          const: true
+        data:
+          $ref: "#/components/schemas/DriveTask"
+
+    WebhookOptions:
+      type: object
+      properties:
+        filter_file_ext:
+          type: array
+          items:
+            type: string
+        filter_events:
+          type: array
+          items:
+            type: string
+
+    WebhookInfo:
+      type: object
+      required: [type, webhook_id]
+      properties:
+        options:
+          $ref: "#/components/schemas/WebhookOptions"
+        app_id:
+          type: string
+        token:
+          type: string
+        url:
+          type: string
+        so_name:
+          type: string
+        type:
+          type: string
+          enum: [shared_library, url]
+        webhook_id:
+          type: string
+
+    WebhookInfoResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          const: true
+        data:
+          $ref: "#/components/schemas/WebhookInfo"
+
+    WebhookListResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          const: true
+        data:
+          type: object
+          properties:
+            total:
+              type: integer
+              minimum: 0
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/WebhookInfo"
+
+    WebhooksGenericForm:
+      type: object
+      required: [api, version, method, _sid]
+      properties:
+        api:
+          type: string
+          const: SYNO.SynologyDrive.Webhooks
+        version:
+          oneOf:
+            - type: string
+              const: "2"
+            - type: integer
+              const: 2
+        method:
+          type: string
+        _sid:
+          type: string
+
+    WebhooksCreateForm:
+      allOf:
+        - $ref: "#/components/schemas/WebhooksGenericForm"
+        - type: object
+          required: [type, app_id]
+          properties:
+            method:
+              type: string
+              const: create
+            options:
+              oneOf:
+                - $ref: "#/components/schemas/WebhookOptions"
+                - type: string
+                  description: JSON-stringified options object
+            so_name:
+              type: string
+            url:
+              type: string
+            token:
+              type: string
+            type:
+              type: string
+              enum: [shared_library, url]
+            app_id:
+              type: string
+
+    WebhooksGetForm:
+      allOf:
+        - $ref: "#/components/schemas/WebhooksGenericForm"
+        - type: object
+          required: [webhook_id, app_id]
+          properties:
+            method:
+              type: string
+              const: get
+            webhook_id:
+              type: string
+            app_id:
+              type: string
+
+    WebhooksUpdateForm:
+      allOf:
+        - $ref: "#/components/schemas/WebhooksGenericForm"
+        - type: object
+          required: [webhook_id, app_id, type]
+          properties:
+            method:
+              type: string
+              const: update
+            webhook_id:
+              type: string
+            app_id:
+              type: string
+            options:
+              oneOf:
+                - $ref: "#/components/schemas/WebhookOptions"
+                - type: string
+                  description: JSON-stringified options object
+            token:
+              type: string
+            url:
+              type: string
+            so_name:
+              type: string
+            type:
+              type: string
+              enum: [shared_library, url]
+
+    WebhooksDeleteForm:
+      allOf:
+        - $ref: "#/components/schemas/WebhooksGenericForm"
+        - type: object
+          required: [webhook_id, app_id]
+          properties:
+            method:
+              type: string
+              const: delete
+            webhook_id:
+              type: string
+            app_id:
+              type: string
+
+    WebhooksListForm:
+      allOf:
+        - $ref: "#/components/schemas/WebhooksGenericForm"
+        - type: object
+          required: [app_id]
+          properties:
+            method:
+              type: string
+              const: list
+            app_id:
+              type: string
