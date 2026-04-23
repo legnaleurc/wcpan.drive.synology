@@ -23,6 +23,9 @@ classifiers = [
 
 [project.optional-dependencies]
 server = [
+    "aiofile>=3.9.0,<4.0.0",
+    "caio>=0.9.0,<1.0.0",
+    "dacite>=1.9.2,<2.0.0",
     "pyyaml>=6.0,<7.0",
     "pymediainfo>=6.0,<7.0",
     "wcpan-logging>=2.1.0,<3.0.0",
