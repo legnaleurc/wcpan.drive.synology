@@ -1,6 +1,7 @@
 """Tests for ClientFileService helpers."""
 
 from datetime import UTC, datetime
+from typing import Any
 from unittest import IsolatedAsyncioTestCase, TestCase
 
 from wcpan.drive.core.exceptions import NodeExistsError, NodeNotFoundError
@@ -138,3 +139,108 @@ class TestCreateDirectory409(IsolatedAsyncioTestCase):
         with self.assertRaises(SynologyServerError) as ctx:
             await svc.create_directory("d", _parent_node(), exist_ok=True, private=None)
         self.assertEqual(ctx.exception.status, 409)
+
+
+class _FakeChangesResponse:
+    def __init__(self, payload: dict[str, Any], status: int = 200) -> None:
+        self.status = status
+        self._payload = payload
+
+    async def json(self) -> dict[str, Any]:
+        return self._payload
+
+    async def __aenter__(self) -> "_FakeChangesResponse":
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+
+class _FakeChangesSession:
+    def __init__(self, pages: dict[str, dict[str, Any]]) -> None:
+        self._pages = pages
+
+    def get(self, _url: str, *, params: dict[str, str]):
+        cursor = params["cursor"]
+        return _FakeChangesResponse(self._pages[cursor])
+
+
+class TestGetChangesReplay(IsolatedAsyncioTestCase):
+    def _node_change(self, node_id: str, parent_id: str | None = "p") -> dict[str, Any]:
+        t = datetime.now(UTC).isoformat()
+        return {
+            "removed": False,
+            "node": {
+                "id": node_id,
+                "mutable_id": node_id,
+                "parent_id": parent_id,
+                "name": node_id,
+                "is_directory": False,
+                "ctime": t,
+                "mtime": t,
+                "mime_type": "text/plain",
+                "hash": "",
+                "size": 1,
+                "is_image": False,
+                "is_video": False,
+                "width": 0,
+                "height": 0,
+                "ms_duration": 0,
+            },
+        }
+
+    def _remove_change(self, node_id: str) -> dict[str, Any]:
+        return {"removed": True, "node_id": node_id}
+
+    async def test_replays_duplicate_same_node_across_pages(self) -> None:
+        pages = {
+            "0": {
+                "cursor": 2,
+                "has_more": True,
+                "changes": [self._node_change("n1"), self._node_change("n1")],
+            },
+            "2": {
+                "cursor": 3,
+                "has_more": False,
+                "changes": [self._remove_change("n1")],
+            },
+        }
+        svc = ClientFileService(
+            session=_FakeChangesSession(pages), server_url="http://srv"
+        )  # type: ignore[arg-type]
+        actions_by_page = []
+        async for actions, cursor in svc.get_changes("0"):
+            actions_by_page.append((actions, cursor))
+
+        self.assertEqual([c for _, c in actions_by_page], ["2", "3"])
+        self.assertEqual(len(actions_by_page[0][0]), 2)
+        self.assertEqual(actions_by_page[0][0][0][1].id, "n1")
+        self.assertEqual(actions_by_page[0][0][1][1].id, "n1")
+        self.assertEqual(actions_by_page[1][0], [(True, "n1")])
+
+    async def test_parent_child_delete_order_does_not_break_iteration(self) -> None:
+        pages = {
+            "0": {
+                "cursor": 3,
+                "has_more": False,
+                "changes": [
+                    self._remove_change("parent"),
+                    self._remove_change("child"),
+                    self._node_change("child", "parent"),
+                ],
+            }
+        }
+        svc = ClientFileService(
+            session=_FakeChangesSession(pages), server_url="http://srv"
+        )  # type: ignore[arg-type]
+
+        seen = []
+        async for actions, cursor in svc.get_changes("0"):
+            seen.append((actions, cursor))
+
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][1], "3")
+        self.assertEqual(seen[0][0][0], (True, "parent"))
+        self.assertEqual(seen[0][0][1], (True, "child"))
+        self.assertFalse(seen[0][0][2][0])
+        self.assertEqual(seen[0][0][2][1].parent_id, "parent")
