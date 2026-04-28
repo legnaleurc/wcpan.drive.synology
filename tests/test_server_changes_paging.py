@@ -61,9 +61,10 @@ class TestStorageChangesPaging(IsolatedAsyncioTestCase):
                 await storage.delete_subtree_and_emit_changes("n1")
 
                 page1, cursor1, has_more1 = await storage.get_changes_since(0, 2)
-                self.assertEqual(len(page1), 2)
+                self.assertEqual(len(page1), 1)
                 self.assertTrue(has_more1)
-                self.assertTrue(all(change[0] == "n1" for change in page1))
+                self.assertEqual(page1[0][0], "n1")
+                self.assertFalse(page1[0][1])
 
                 page2, cursor2, has_more2 = await storage.get_changes_since(cursor1, 2)
                 self.assertEqual(len(page2), 1)
@@ -87,8 +88,45 @@ class TestStorageChangesPaging(IsolatedAsyncioTestCase):
                 await storage.upsert_node_and_emit_change(n1)
 
                 changes, _, _ = await storage.get_changes_since(0, 10)
-                self.assertEqual([c[0] for c in changes], ["n1", "n1", "n1"])
-                self.assertEqual([c[1] for c in changes], [False, True, False])
+                self.assertEqual([c[0] for c in changes], ["n1"])
+                self.assertEqual([c[1] for c in changes], [False])
+        finally:
+            os.unlink(db_path)
+
+    async def test_same_page_upsert_then_delete_keeps_delete(self) -> None:
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            with ThreadPoolExecutor() as pool:
+                storage = _make_storage(db_path, pool)
+                await storage.ensure_schema()
+                n1 = _make_node("n1")
+                await storage.upsert_node_and_emit_change(n1)
+                await storage.delete_subtree_and_emit_changes("n1")
+
+                changes, _, _ = await storage.get_changes_since(0, 10)
+                self.assertEqual(len(changes), 1)
+                self.assertEqual(changes[0][0], "n1")
+                self.assertTrue(changes[0][1])
+        finally:
+            os.unlink(db_path)
+
+    async def test_same_page_delete_then_upsert_keeps_upsert(self) -> None:
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            with ThreadPoolExecutor() as pool:
+                storage = _make_storage(db_path, pool)
+                await storage.ensure_schema()
+                n1 = _make_node("n1")
+                await storage.upsert_node_and_emit_change(n1)
+                await storage.delete_subtree_and_emit_changes("n1")
+                await storage.upsert_node_and_emit_change(n1)
+
+                changes, _, _ = await storage.get_changes_since(0, 10)
+                self.assertEqual(len(changes), 1)
+                self.assertEqual(changes[0][0], "n1")
+                self.assertFalse(changes[0][1])
         finally:
             os.unlink(db_path)
 

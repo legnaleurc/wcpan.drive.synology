@@ -498,8 +498,19 @@ def _get_changes_since(
     has_more = len(rows) > max_size
     rows = rows[:max_size]
 
-    result: list[tuple[MirrorStableId, bool, NodeRecord | None]] = []
+    # Deduplicate within this raw page by node_id, keeping the last row
+    # (largest change_id) for each node.
+    latest_by_node_id: dict[str, sqlite3.Row] = {}
     for row in rows:
+        latest_by_node_id[row["node_id"]] = row
+
+    deduped_rows = sorted(
+        latest_by_node_id.values(),
+        key=lambda row: int(row["change_id"]),
+    )
+
+    result: list[tuple[MirrorStableId, bool, NodeRecord | None]] = []
+    for row in deduped_rows:
         is_removed = bool(row["is_removed"])
         record: NodeRecord | None = None
         if not is_removed and row["name"] is not None:
