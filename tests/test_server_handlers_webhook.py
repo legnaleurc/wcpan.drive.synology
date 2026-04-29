@@ -377,53 +377,24 @@ class TestExecuteWebhookPlan(IsolatedAsyncioTestCase):
             },
         )
 
-        async def _scheduled():
-            return None
-
-        mock_delayed = MagicMock(side_effect=lambda *args: _scheduled())
-
-        with patch.object(service, "_delayed_file_upsert", new=mock_delayed):
+        with patch.object(
+            service,
+            "_fetch_and_enrich",
+            new_callable=AsyncMock,
+        ) as mock_fetch:
             await service._execute_webhook_plan(plan, pending=pending)
 
-        mock_delayed.assert_called_once_with(
-            plan.file_ref,
-            plan.permanent_link_ref,
-            plan.parent_file_ref,
-            plan.event_type,
-        )
-        pending.schedule.assert_called_once()
-        self.assertEqual(pending.schedule.call_args.args[0], "f1")
-        scheduled_coro = pending.schedule.call_args.args[1]
-        scheduled_coro.close()
+            pending.schedule.assert_called_once()
+            self.assertEqual(pending.schedule.call_args.args[0], "f1")
 
-
-# ---------------------------------------------------------------------------
-# _delayed_file_upsert
-# ---------------------------------------------------------------------------
-
-
-class TestDelayedFileUpsert(IsolatedAsyncioTestCase):
-    async def test_sleeps_once_then_fetches(self):
-        service = _make_service()
-        with (
-            patch.object(
-                service,
-                "_fetch_and_enrich",
-                new_callable=AsyncMock,
-            ) as mock_fetch,
-            patch(
-                "wcpan.drive.synology._server.services.webhook.asyncio.sleep",
-                new_callable=AsyncMock,
-            ) as mock_sleep,
-        ):
-            await service._delayed_file_upsert(
-                SynologyFileId(file_id="f1"),
-                SynologyPermanentLink(permanent_link="f1"),
-                SynologyFileId(file_id="p1"),
-                "file_created",
+            factory = pending.schedule.call_args.args[1]
+            await factory()
+            mock_fetch.assert_awaited_once_with(
+                plan.file_ref,
+                plan.permanent_link_ref,
+                plan.parent_file_ref,
+                plan.event_type,
             )
-        mock_sleep.assert_awaited_once()
-        mock_fetch.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 """Webhook event processing service with debounced file upsert handling."""
 
 import asyncio
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from logging import getLogger
 from typing import Any
@@ -36,25 +36,80 @@ async def _guarded(file_id: str, coro: Coroutine[Any, Any, None]) -> None:
         _L.exception("Pending file task failed for %s", file_id)
 
 
-class _PendingFileScheduler:
-    """Tracks one delayed-upsert task per file_id within the server's TaskGroup."""
+class _Debouncer:
+    """Runs one delayed task without canceling it after the body starts."""
 
-    def __init__(self, group: asyncio.TaskGroup) -> None:
+    def __init__(
+        self,
+        group: asyncio.TaskGroup,
+        delay: float,
+        factory: Callable[[], Coroutine[Any, Any, None]],
+    ) -> None:
         self._group = group
-        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._delay = delay
+        self._factory = factory
+        self._task: asyncio.Task[None] | None = None
+        self.started = False
 
-    def schedule(self, file_id: str, coro: Coroutine[Any, Any, None]) -> None:
-        """Cancel any existing pending task for *file_id* and schedule *coro*."""
-        if old := self._tasks.pop(file_id, None):
-            old.cancel()
-        task = self._group.create_task(_guarded(file_id, coro))
-        self._tasks[file_id] = task
-        task.add_done_callback(lambda _: self._tasks.pop(file_id, None))
+    def start(self) -> asyncio.Task[None]:
+        task = self._group.create_task(self._run())
+        self._task = task
+        return task
 
-    def cancel(self, file_id: str) -> None:
-        """Cancel the pending task for *file_id* if one exists."""
-        if task := self._tasks.pop(file_id, None):
-            task.cancel()
+    def cancel_pending(self) -> bool:
+        if self.started or self._task is None:
+            return False
+        self._task.cancel()
+        return True
+
+    def is_task(self, task: asyncio.Task[None]) -> bool:
+        return self._task is task
+
+    async def _run(self) -> None:
+        await asyncio.sleep(self._delay)
+        self.started = True
+        await self._factory()
+
+
+class _TaskIdDebouncer:
+    """Debounces work independently for each task id."""
+
+    def __init__(
+        self, group: asyncio.TaskGroup, delay: float = _PENDING_FILE_DELAY
+    ) -> None:
+        self._group = group
+        self._delay = delay
+        self._debouncers: dict[str, _Debouncer] = {}
+
+    def schedule(
+        self,
+        task_id: str,
+        factory: Callable[[], Coroutine[Any, Any, None]],
+    ) -> None:
+        current = self._debouncers.get(task_id)
+        if current is not None:
+            if current.started:
+                return
+            current.cancel_pending()
+
+        debouncer = _Debouncer(
+            self._group,
+            self._delay,
+            lambda: _guarded(task_id, factory()),
+        )
+        task = debouncer.start()
+        self._debouncers[task_id] = debouncer
+
+        def cleanup(done: asyncio.Task[None]) -> None:
+            if debouncer.is_task(done) and self._debouncers.get(task_id) is debouncer:
+                self._debouncers.pop(task_id, None)
+
+        task.add_done_callback(cleanup)
+
+    def cancel(self, task_id: str) -> None:
+        if (current := self._debouncers.get(task_id)) and not current.started:
+            self._debouncers.pop(task_id, None)
+            current.cancel_pending()
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,21 +195,6 @@ class WebhookService:
                 record.id,
             )
         await self._node_sync.upsert(record)
-
-    async def _delayed_file_upsert(
-        self,
-        file_ref: SynologyFileId,
-        permanent_link_ref: SynologyPermanentLink,
-        parent_file_ref: SynologyFileId | None,
-        event_type: str,
-    ) -> None:
-        await asyncio.sleep(_PENDING_FILE_DELAY)
-        await self._fetch_and_enrich(
-            file_ref,
-            permanent_link_ref,
-            parent_file_ref,
-            event_type,
-        )
 
     def _classify_webhook_item(
         self,
@@ -246,7 +286,7 @@ class WebhookService:
         self,
         plan: _WebhookActionPlan,
         *,
-        pending: _PendingFileScheduler,
+        pending: _TaskIdDebouncer,
     ) -> None:
         if plan.fetch_immediately:
             await self._fetch_and_enrich(
@@ -275,7 +315,7 @@ class WebhookService:
         if plan.schedule_delayed_upsert:
             pending.schedule(
                 plan.schedule_key,
-                self._delayed_file_upsert(
+                lambda: self._fetch_and_enrich(
                     plan.file_ref,
                     plan.permanent_link_ref,
                     plan.parent_file_ref,
@@ -347,7 +387,7 @@ class WebhookService:
         group: asyncio.TaskGroup,
         scan_done_event: asyncio.Event,
     ) -> None:
-        pending = _PendingFileScheduler(group)
+        pending = _TaskIdDebouncer(group)
         await scan_done_event.wait()
         while True:
             item = await queue.get()
