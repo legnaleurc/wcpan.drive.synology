@@ -30,6 +30,7 @@ from .workers import (
     create_metadata_queue,
     create_write_queue,
     metadata_worker,
+    noop_after_write,
     write_worker,
 )
 
@@ -164,7 +165,7 @@ async def run_backfill(
             syno_paths=syno_paths,
             node_sync=node_sync,
         )
-        write_task = asyncio.create_task(write_worker(write_queue))
+        write_task = asyncio.create_task(write_worker(write_queue, noop_after_write))
         meta_tasks: list[asyncio.Task[None]] = [
             asyncio.create_task(
                 metadata_worker(metadata_queue, node_sync.process_metadata_item)

@@ -1,23 +1,22 @@
 """Webhook event processing service with debounced file upsert handling."""
 
 import asyncio
-from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from logging import getLogger
-from typing import Any
 
 from ...types import MirrorStableId, NodeRecord
 from ..api.drive import SynologyDriveApi
 from ..api.lib import convert_file_info
 from ..api.types import SynologyWebhookEvent
 from ..lib.bfs import parallel_bfs
+from ..lib.debounce import TaskIdDebouncer
 from ..lib.mounts import MountRegistry
 from ..types import (
     SynologyFileId,
     SynologyPermanentLink,
-    WebhookQueue,
     WriteQueue,
 )
+from ..workers import WebhookQueue
 from .paths import SynologyPathService
 from .storage import StorageService
 from .sync import NodeSyncService
@@ -28,88 +27,8 @@ _L = getLogger(__name__)
 _PENDING_FILE_DELAY = 10.0
 
 
-async def _guarded(file_id: str, coro: Coroutine[Any, Any, None]) -> None:
-    """Run *coro*, logging (but not re-raising) any non-cancellation exception."""
-    try:
-        await coro
-    except Exception:
-        _L.exception("Pending file task failed for %s", file_id)
-
-
-class _Debouncer:
-    """Runs one delayed task without canceling it after the body starts."""
-
-    def __init__(
-        self,
-        group: asyncio.TaskGroup,
-        delay: float,
-        factory: Callable[[], Coroutine[Any, Any, None]],
-    ) -> None:
-        self._group = group
-        self._delay = delay
-        self._factory = factory
-        self._task: asyncio.Task[None] | None = None
-        self.started = False
-
-    def start(self) -> asyncio.Task[None]:
-        task = self._group.create_task(self._run())
-        self._task = task
-        return task
-
-    def cancel_pending(self) -> bool:
-        if self.started or self._task is None:
-            return False
-        self._task.cancel()
-        return True
-
-    def is_task(self, task: asyncio.Task[None]) -> bool:
-        return self._task is task
-
-    async def _run(self) -> None:
-        await asyncio.sleep(self._delay)
-        self.started = True
-        await self._factory()
-
-
-class _TaskIdDebouncer:
-    """Debounces work independently for each task id."""
-
-    def __init__(
-        self, group: asyncio.TaskGroup, delay: float = _PENDING_FILE_DELAY
-    ) -> None:
-        self._group = group
-        self._delay = delay
-        self._debouncers: dict[str, _Debouncer] = {}
-
-    def schedule(
-        self,
-        task_id: str,
-        factory: Callable[[], Coroutine[Any, Any, None]],
-    ) -> None:
-        current = self._debouncers.get(task_id)
-        if current is not None:
-            if current.started:
-                return
-            current.cancel_pending()
-
-        debouncer = _Debouncer(
-            self._group,
-            self._delay,
-            lambda: _guarded(task_id, factory()),
-        )
-        task = debouncer.start()
-        self._debouncers[task_id] = debouncer
-
-        def cleanup(done: asyncio.Task[None]) -> None:
-            if debouncer.is_task(done) and self._debouncers.get(task_id) is debouncer:
-                self._debouncers.pop(task_id, None)
-
-        task.add_done_callback(cleanup)
-
-    def cancel(self, task_id: str) -> None:
-        if (current := self._debouncers.get(task_id)) and not current.started:
-            self._debouncers.pop(task_id, None)
-            current.cancel_pending()
+def _log_pending_file_error(file_id: str, _error: Exception) -> None:
+    _L.exception("Pending file task failed for %s", file_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,7 +205,7 @@ class WebhookService:
         self,
         plan: _WebhookActionPlan,
         *,
-        pending: _TaskIdDebouncer,
+        pending: TaskIdDebouncer,
     ) -> None:
         if plan.fetch_immediately:
             await self._fetch_and_enrich(
@@ -387,7 +306,11 @@ class WebhookService:
         group: asyncio.TaskGroup,
         scan_done_event: asyncio.Event,
     ) -> None:
-        pending = _TaskIdDebouncer(group)
+        pending = TaskIdDebouncer(
+            group,
+            _PENDING_FILE_DELAY,
+            on_error=_log_pending_file_error,
+        )
         await scan_done_event.wait()
         while True:
             item = await queue.get()

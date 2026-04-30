@@ -8,8 +8,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 from wcpan.drive.synology._server.types import MetadataWorkItem
 from wcpan.drive.synology._server.workers import (
-    checkpoint_worker,
+    create_checkpoint_scheduler,
     metadata_worker,
+    noop_after_write,
     write_worker,
 )
 from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
@@ -140,7 +141,7 @@ class TestWriteWorker(IsolatedAsyncioTestCase):
 
         await q.put(op)
 
-        worker = asyncio.create_task(write_worker(q))
+        worker = asyncio.create_task(write_worker(q, noop_after_write))
         await q.join()
         worker.cancel()
         try:
@@ -148,6 +149,24 @@ class TestWriteWorker(IsolatedAsyncioTestCase):
         except asyncio.CancelledError:
             pass
         self.assertEqual(executed, [1])
+
+    async def test_successful_task_calls_after_write(self):
+        q: asyncio.Queue = asyncio.Queue()
+        after_write = MagicMock()
+
+        async def op() -> None:
+            pass
+
+        await q.put(op)
+
+        worker = asyncio.create_task(write_worker(q, after_write))
+        await q.join()
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+        after_write.assert_called_once_with()
 
     async def test_exception_propagates(self):
         q: asyncio.Queue = asyncio.Queue()
@@ -157,29 +176,71 @@ class TestWriteWorker(IsolatedAsyncioTestCase):
 
         await q.put(boom)
 
-        worker = asyncio.create_task(write_worker(q))
+        worker = asyncio.create_task(write_worker(q, noop_after_write))
         with self.assertRaises(RuntimeError):
             await worker
 
+    async def test_failed_task_does_not_call_after_write(self):
+        q: asyncio.Queue = asyncio.Queue()
+        after_write = MagicMock()
 
-class TestCheckpointWorker(IsolatedAsyncioTestCase):
-    async def test_calls_checkpoint(self):
+        async def boom() -> None:
+            raise RuntimeError("db error")
+
+        await q.put(boom)
+
+        worker = asyncio.create_task(write_worker(q, after_write))
+        with self.assertRaises(RuntimeError):
+            await worker
+        after_write.assert_not_called()
+
+
+class TestCheckpointScheduler(IsolatedAsyncioTestCase):
+    async def test_calls_checkpoint_after_schedule(self):
         storage = MagicMock()
         storage.checkpoint = AsyncMock()
 
-        import wcpan.drive.synology._server.workers as wmod
-
-        original = wmod._WAL_CHECKPOINT_INTERVAL
-        wmod._WAL_CHECKPOINT_INTERVAL = 0.01
-        try:
-            worker = asyncio.create_task(checkpoint_worker(storage))
+        async with asyncio.TaskGroup() as group:
+            schedule = create_checkpoint_scheduler(group, storage, delay=0.01)
+            schedule()
             await asyncio.sleep(0.05)
-            worker.cancel()
-            try:
-                await worker
-            except asyncio.CancelledError:
-                pass
-        finally:
-            wmod._WAL_CHECKPOINT_INTERVAL = original
 
-        self.assertGreater(storage.checkpoint.await_count, 0)
+        storage.checkpoint.assert_awaited_once()
+
+    async def test_does_not_checkpoint_without_schedule(self):
+        storage = MagicMock()
+        storage.checkpoint = AsyncMock()
+
+        async with asyncio.TaskGroup() as group:
+            create_checkpoint_scheduler(group, storage, delay=0.01)
+            await asyncio.sleep(0.03)
+
+        storage.checkpoint.assert_not_called()
+
+    async def test_debounces_multiple_schedules(self):
+        storage = MagicMock()
+        storage.checkpoint = AsyncMock()
+
+        async with asyncio.TaskGroup() as group:
+            schedule = create_checkpoint_scheduler(group, storage, delay=0.03)
+            schedule()
+            await asyncio.sleep(0.01)
+            schedule()
+            await asyncio.sleep(0.01)
+            schedule()
+            await asyncio.sleep(0.05)
+
+        storage.checkpoint.assert_awaited_once()
+
+    async def test_can_schedule_again_after_checkpoint_completes(self):
+        storage = MagicMock()
+        storage.checkpoint = AsyncMock()
+
+        async with asyncio.TaskGroup() as group:
+            schedule = create_checkpoint_scheduler(group, storage, delay=0.01)
+            schedule()
+            await asyncio.sleep(0.03)
+            schedule()
+            await asyncio.sleep(0.03)
+
+        self.assertEqual(storage.checkpoint.await_count, 2)

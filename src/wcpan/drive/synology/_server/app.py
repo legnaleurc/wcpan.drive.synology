@@ -51,7 +51,7 @@ from .services.webhook import WebhookService
 from .types import MetadataQueue, ServerConfig, WriteQueue
 from .workers import (
     METADATA_WORKER_COUNT,
-    checkpoint_worker,
+    create_checkpoint_scheduler,
     create_metadata_queue,
     create_webhook_queue,
     create_write_queue,
@@ -155,8 +155,10 @@ async def _managed_background_tasks(
 
     async with AsyncExitStack() as stack:
         group = await stack.enter_async_context(asyncio.TaskGroup())
-        await stack.enter_async_context(_background(group, write_worker(write_queue)))
-        await stack.enter_async_context(_background(group, checkpoint_worker(storage)))
+        schedule_checkpoint = create_checkpoint_scheduler(group, storage)
+        await stack.enter_async_context(
+            _background(group, write_worker(write_queue, schedule_checkpoint))
+        )
         for _ in range(METADATA_WORKER_COUNT):
             await stack.enter_async_context(
                 _background(

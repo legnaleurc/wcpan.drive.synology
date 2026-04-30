@@ -7,7 +7,8 @@ from .services.paths import SynologyPathService
 from .services.storage import StorageService
 from .services.sync import NodeSyncService
 from .services.upload import UploadService
-from .types import ServerConfig, WebhookQueue, WriteQueue
+from .types import ServerConfig, WriteQueue
+from .workers import WebhookQueue
 
 
 CONFIG_KEY = AppKey[ServerConfig]("server_config")

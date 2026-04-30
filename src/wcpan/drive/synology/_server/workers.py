@@ -3,15 +3,22 @@ import os
 from collections.abc import Awaitable, Callable
 from logging import getLogger
 
+from .api.types import SynologyWebhookEvent
+from .lib.debounce import Debouncer
 from .services.storage import StorageService
-from .types import MetadataQueue, MetadataWorkItem, WebhookQueue, WriteQueue
+from .types import MetadataQueue, MetadataWorkItem, WriteQueue
 
 
 _L = getLogger(__name__)
 
-_WAL_CHECKPOINT_INTERVAL = 300.0  # seconds
+_WAL_CHECKPOINT_DELAY = 30.0  # seconds
+type WebhookQueue = asyncio.Queue[SynologyWebhookEvent]
 
 METADATA_WORKER_COUNT = max(2, os.process_cpu_count() or 1)
+
+
+def noop_after_write() -> None:
+    pass
 
 
 def create_write_queue() -> WriteQueue:
@@ -45,20 +52,40 @@ async def metadata_worker(
             metadata_queue.task_done()
 
 
-async def checkpoint_worker(storage: StorageService) -> None:
-    while True:
-        await asyncio.sleep(_WAL_CHECKPOINT_INTERVAL)
-        await storage.checkpoint()
+def _log_checkpoint_error(_task_id: str, _error: Exception) -> None:
+    _L.exception("WAL checkpoint failed")
+
+
+def create_checkpoint_scheduler(
+    group: asyncio.TaskGroup,
+    storage: StorageService,
+    *,
+    delay: float = _WAL_CHECKPOINT_DELAY,
+) -> Callable[[], None]:
+    debouncer = Debouncer(
+        group,
+        delay,
+        on_error=_log_checkpoint_error,
+    )
+
+    def schedule_checkpoint() -> None:
+        debouncer.start(storage.checkpoint)
+
+    return schedule_checkpoint
 
 
 # Let-it-crash on write failure by design.
 # Write failure in sqlite likely means the system is unstable.
 # Discard any in-memory data, and let the next initialization recover the state.
-async def write_worker(write_queue: WriteQueue) -> None:
+async def write_worker(
+    write_queue: WriteQueue,
+    after_write: Callable[[], None],
+) -> None:
     while True:
         task = await write_queue.get()
         try:
             await task()
+            after_write()
         except Exception:
             _L.exception("write task failed")
             raise

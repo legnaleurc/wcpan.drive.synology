@@ -7,7 +7,6 @@ from pathlib import PurePosixPath
 from typing import NewType, Self
 
 from ..types import MirrorMutableId, MirrorStableId, NodeRecord
-from .api.types import SynologyWebhookEvent
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +78,6 @@ type SynologyFolderRef = SynologyLookupRef | SynologyPath
 # ---------------------------------------------------------------------------
 
 type WriteQueue = asyncio.Queue[Callable[[], Awaitable[None]]]
-type WebhookQueue = asyncio.Queue[SynologyWebhookEvent]
 
 
 @dataclass(frozen=True, slots=True)

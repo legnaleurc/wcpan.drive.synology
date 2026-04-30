@@ -29,6 +29,7 @@ from wcpan.drive.synology._server.workers import (
     create_metadata_queue,
     create_write_queue,
     metadata_worker,
+    noop_after_write,
     write_worker,
 )
 from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
@@ -69,7 +70,7 @@ async def _reconcile_with_worker(
             syno_paths=syno_paths,
             node_sync=cs,
         )
-        write_task = asyncio.create_task(write_worker(q))
+        write_task = asyncio.create_task(write_worker(q, noop_after_write))
         meta_task = asyncio.create_task(metadata_worker(mq, cs.process_metadata_item))
         try:
             with patch.object(

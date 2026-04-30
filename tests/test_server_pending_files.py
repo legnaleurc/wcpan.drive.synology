@@ -1,43 +1,13 @@
-"""Tests for debounce helpers and the _guarded wrapper."""
+"""Tests for debounce helpers."""
 
 import asyncio
 import logging
 from unittest import IsolatedAsyncioTestCase
 
-from wcpan.drive.synology._server.services.webhook import (
-    _Debouncer,
-    _guarded,
-    _TaskIdDebouncer,
-)
+from wcpan.drive.synology._server.lib.debounce import Debouncer, TaskIdDebouncer
 
 
 logging.getLogger("wcpan.drive.synology._server").setLevel(logging.CRITICAL + 1)
-
-
-class TestGuarded(IsolatedAsyncioTestCase):
-    async def test_normal_completion(self):
-        called = False
-
-        async def ok():
-            nonlocal called
-            called = True
-
-        await _guarded("f1", ok())
-        self.assertTrue(called)
-
-    async def test_exception_is_logged_not_raised(self):
-        async def boom():
-            raise ValueError("oops")
-
-        # Should not raise
-        await _guarded("f1", boom())
-
-    async def test_cancelled_error_propagates(self):
-        async def cancel():
-            raise asyncio.CancelledError()
-
-        with self.assertRaises(asyncio.CancelledError):
-            await _guarded("f1", cancel())
 
 
 class TestDebouncer(IsolatedAsyncioTestCase):
@@ -48,8 +18,8 @@ class TestDebouncer(IsolatedAsyncioTestCase):
             completed.set()
 
         async with asyncio.TaskGroup() as tg:
-            debouncer = _Debouncer(tg, 999, lambda: work())
-            debouncer.start()
+            debouncer = Debouncer(tg, 999, key="f1")
+            debouncer.start(lambda: work())
             await asyncio.sleep(0)
             self.assertFalse(completed.is_set())
             debouncer.cancel_pending()
@@ -61,16 +31,16 @@ class TestDebouncer(IsolatedAsyncioTestCase):
             completed.set()
 
         async with asyncio.TaskGroup() as tg:
-            debouncer = _Debouncer(tg, 0, lambda: work())
-            debouncer.start()
+            debouncer = Debouncer(tg, 0, key="f1")
+            debouncer.start(lambda: work())
             await completed.wait()
 
-        self.assertTrue(debouncer.started)
+        self.assertFalse(debouncer.started)
 
     async def test_cancel_pending_cancels_unstarted_task(self):
         async with asyncio.TaskGroup() as tg:
-            debouncer = _Debouncer(tg, 999, lambda: asyncio.sleep(0))
-            task = debouncer.start()
+            debouncer = Debouncer(tg, 999, key="f1")
+            task = debouncer.start(lambda: asyncio.sleep(0))
 
             self.assertTrue(debouncer.cancel_pending())
             with self.assertRaises(asyncio.CancelledError):
@@ -91,14 +61,33 @@ class TestDebouncer(IsolatedAsyncioTestCase):
                 raise
 
         async with asyncio.TaskGroup() as tg:
-            debouncer = _Debouncer(tg, 0, lambda: work())
-            debouncer.start()
+            debouncer = Debouncer(tg, 0, key="f1")
+            debouncer.start(lambda: work())
             await first_started.wait()
 
             self.assertFalse(debouncer.cancel_pending())
             allow_finish.set()
 
         self.assertFalse(cancelled)
+
+    async def test_error_handler_swallows_exception(self):
+        seen: list[tuple[str, Exception]] = []
+
+        async def work():
+            raise ValueError("oops")
+
+        async with asyncio.TaskGroup() as tg:
+            debouncer = Debouncer(
+                tg,
+                0,
+                key="f1",
+                on_error=lambda key, error: seen.append((key, error)),
+            )
+            debouncer.start(lambda: work())
+            await asyncio.sleep(0)
+
+        self.assertEqual(seen[0][0], "f1")
+        self.assertIsInstance(seen[0][1], ValueError)
 
 
 class TestTaskIdDebouncer(IsolatedAsyncioTestCase):
@@ -109,7 +98,7 @@ class TestTaskIdDebouncer(IsolatedAsyncioTestCase):
             completed.set()
 
         async with asyncio.TaskGroup() as tg:
-            svc = _TaskIdDebouncer(tg, delay=999)
+            svc = TaskIdDebouncer(tg, delay=999)
             svc.schedule("f1", lambda: work())
             await asyncio.sleep(0)
             self.assertFalse(completed.is_set())
@@ -122,7 +111,7 @@ class TestTaskIdDebouncer(IsolatedAsyncioTestCase):
             completed.set()
 
         async with asyncio.TaskGroup() as tg:
-            svc = _TaskIdDebouncer(tg, delay=0)
+            svc = TaskIdDebouncer(tg, delay=0)
             svc.schedule("f1", lambda: work())
             await completed.wait()
 
@@ -139,7 +128,7 @@ class TestTaskIdDebouncer(IsolatedAsyncioTestCase):
             second_done.set()
 
         async with asyncio.TaskGroup() as tg:
-            svc = _TaskIdDebouncer(tg, delay=0.05)
+            svc = TaskIdDebouncer(tg, delay=0.05)
             svc.schedule("f1", lambda: first())
             await asyncio.sleep(0)
             # Scheduling same file_id during the delay should renew the debounce.
@@ -168,7 +157,7 @@ class TestTaskIdDebouncer(IsolatedAsyncioTestCase):
             second_called = True
 
         async with asyncio.TaskGroup() as tg:
-            svc = _TaskIdDebouncer(tg, delay=0)
+            svc = TaskIdDebouncer(tg, delay=0)
             svc.schedule("f1", lambda: first())
             await first_started.wait()
             svc.schedule("f1", lambda: second())
@@ -186,7 +175,7 @@ class TestTaskIdDebouncer(IsolatedAsyncioTestCase):
             called = True
 
         async with asyncio.TaskGroup() as tg:
-            svc = _TaskIdDebouncer(tg, delay=999)
+            svc = TaskIdDebouncer(tg, delay=999)
             svc.schedule("f1", lambda: work())
             await asyncio.sleep(0)
             svc.cancel("f1")
@@ -195,7 +184,7 @@ class TestTaskIdDebouncer(IsolatedAsyncioTestCase):
 
     async def test_cancel_nonexistent_is_noop(self):
         async with asyncio.TaskGroup() as tg:
-            svc = _TaskIdDebouncer(tg)
+            svc = TaskIdDebouncer(tg, delay=0)
             svc.cancel("no-such-file")  # should not raise
 
     async def test_done_callback_cleans_up(self):
@@ -205,7 +194,7 @@ class TestTaskIdDebouncer(IsolatedAsyncioTestCase):
             done.set()
 
         async with asyncio.TaskGroup() as tg:
-            svc = _TaskIdDebouncer(tg, delay=0)
+            svc = TaskIdDebouncer(tg, delay=0)
             svc.schedule("f1", lambda: quick())
             await done.wait()
             # Give the done-callback a chance to run
@@ -224,7 +213,7 @@ class TestTaskIdDebouncer(IsolatedAsyncioTestCase):
             second_done.set()
 
         async with asyncio.TaskGroup() as tg:
-            svc = _TaskIdDebouncer(tg, delay=0.05)
+            svc = TaskIdDebouncer(tg, delay=0.05)
             svc.schedule("f1", lambda: first())
             old_task = svc._debouncers["f1"]._task
             self.assertIsNotNone(old_task)
