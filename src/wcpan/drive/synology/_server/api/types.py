@@ -16,6 +16,7 @@ class SynologyFileInfo(TypedDict):
     size: int
     created_time: int  # Unix timestamp seconds
     modified_time: int  # Unix timestamp seconds
+    change_time: int  # Unix timestamp seconds
     sync_id: int
     max_id: NotRequired[int]
     removed: NotRequired[bool]

@@ -16,8 +16,9 @@ class NodeRecordDict(TypedDict):
     parent_id: str | None
     name: str
     is_directory: bool
-    ctime: str
-    mtime: str
+    created_time: int
+    modified_time: int
+    changed_time: int
     mime_type: str
     hash: str
     size: int
@@ -48,8 +49,9 @@ def node_from_record(record: NodeRecord) -> Node:
         name=record.name,
         is_directory=record.is_directory,
         is_trashed=False,
-        ctime=record.ctime,
-        mtime=record.mtime,
+        created_time=utc_from_timestamp(record.created_time),
+        modified_time=utc_from_timestamp(record.modified_time),
+        changed_time=utc_from_timestamp(record.changed_time),
         mime_type=record.mime_type,
         hash=record.hash,
         size=record.size,
@@ -69,8 +71,9 @@ def node_record_to_dict(record: NodeRecord) -> NodeRecordDict:
         "parent_id": str(record.parent_id) if record.parent_id is not None else None,
         "name": record.name,
         "is_directory": record.is_directory,
-        "ctime": record.ctime.isoformat(),
-        "mtime": record.mtime.isoformat(),
+        "created_time": record.created_time,
+        "modified_time": record.modified_time,
+        "changed_time": record.changed_time,
         "mime_type": record.mime_type,
         "hash": record.hash,
         "size": record.size,
@@ -83,12 +86,6 @@ def node_record_to_dict(record: NodeRecord) -> NodeRecordDict:
 
 
 def node_record_from_dict(data: NodeRecordDict) -> NodeRecord:
-    ctime = datetime.fromisoformat(data["ctime"])
-    mtime = datetime.fromisoformat(data["mtime"])
-    if ctime.tzinfo is None:
-        ctime = ctime.replace(tzinfo=UTC)
-    if mtime.tzinfo is None:
-        mtime = mtime.replace(tzinfo=UTC)
     parent_id = data["parent_id"]
     return NodeRecord(
         id=MirrorStableId(data["id"]),
@@ -96,8 +93,9 @@ def node_record_from_dict(data: NodeRecordDict) -> NodeRecord:
         parent_id=MirrorStableId(parent_id) if parent_id is not None else None,
         name=data["name"],
         is_directory=data["is_directory"],
-        ctime=ctime,
-        mtime=mtime,
+        created_time=data["created_time"],
+        modified_time=data["modified_time"],
+        changed_time=data["changed_time"],
         mime_type=data["mime_type"],
         hash=data["hash"],
         size=data["size"],
@@ -115,8 +113,8 @@ def guess_mime_type(name: str, *, is_directory: bool) -> str:
     return mimetypes.guess_type(name)[0] or "application/octet-stream"
 
 
-def utc_now() -> datetime:
-    return datetime.now(UTC)
+def utc_now() -> int:
+    return int(datetime.now(UTC).timestamp())
 
 
 def utc_from_timestamp(ts: int) -> datetime:

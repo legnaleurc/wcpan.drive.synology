@@ -28,9 +28,11 @@ def _reconcile_api_fields_differ(db: NodeRecord, merged: NodeRecord) -> bool:
         return True
     if db.size != merged.size:
         return True
-    if int(db.mtime.timestamp()) != int(merged.mtime.timestamp()):
+    if db.modified_time != merged.modified_time:
         return True
-    if int(db.ctime.timestamp()) != int(merged.ctime.timestamp()):
+    if db.created_time != merged.created_time:
+        return True
+    if db.changed_time != merged.changed_time:
         return True
     if _norm_hash(db.hash) != _norm_hash(merged.hash):
         return True

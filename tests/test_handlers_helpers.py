@@ -1,6 +1,5 @@
 """Tests for small pure helpers in server._handlers."""
 
-from datetime import UTC, datetime
 from unittest import TestCase
 
 from wcpan.drive.synology._server.handlers.lib import (
@@ -11,14 +10,15 @@ from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
 def _sample_record() -> NodeRecord:
-    now = datetime(2024, 3, 1, tzinfo=UTC)
+    now = 1_709_251_200
     return NodeRecord(
         id="id1",
         parent_id="p1",
         name="x.txt",
         is_directory=False,
-        ctime=now,
-        mtime=now,
+        created_time=now,
+        modified_time=now,
+        changed_time=now,
         mime_type="text/plain",
         hash="",
         size=1,

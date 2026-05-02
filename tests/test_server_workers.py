@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from datetime import UTC, datetime
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,7 +18,7 @@ from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 logging.getLogger("wcpan.drive.synology._server").setLevel(logging.CRITICAL + 1)
 
 
-_EPOCH = datetime.fromtimestamp(0, UTC)
+_EPOCH = 0
 
 
 def _make_record(node_id: str = "n1") -> NodeRecord:
@@ -28,8 +27,9 @@ def _make_record(node_id: str = "n1") -> NodeRecord:
         parent_id="p1",
         name="x",
         is_directory=False,
-        ctime=_EPOCH,
-        mtime=_EPOCH,
+        created_time=_EPOCH,
+        modified_time=_EPOCH,
+        changed_time=_EPOCH,
         mime_type="text/plain",
         hash="",
         size=0,

@@ -2,7 +2,7 @@
 
 from logging import getLogger
 
-from ..._lib import guess_mime_type, utc_from_timestamp
+from ..._lib import guess_mime_type
 from ...types import MirrorMutableId, MirrorStableId, NodeRecord
 from .types import SynologyFileInfo
 
@@ -32,8 +32,9 @@ def convert_file_info(
         parent_id=parent_id,
         name=name,
         is_directory=is_dir,
-        ctime=utc_from_timestamp(info.get("created_time", 0)),
-        mtime=utc_from_timestamp(info.get("modified_time", 0)),
+        created_time=info.get("created_time", 0),
+        modified_time=info.get("modified_time", 0),
+        changed_time=info.get("change_time", 0),
         mime_type=guess_mime_type(name, is_directory=is_dir),
         hash=info.get("hash", ""),
         size=info.get("size", 0),

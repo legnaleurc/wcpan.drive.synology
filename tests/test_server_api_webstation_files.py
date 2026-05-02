@@ -26,6 +26,7 @@ def _item(fid: str, name: str) -> dict:
         "size": 0,
         "created_time": 0,
         "modified_time": 0,
+        "change_time": 0,
         "sync_id": 1,
     }
 

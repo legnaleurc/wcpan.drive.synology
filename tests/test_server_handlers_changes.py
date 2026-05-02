@@ -1,7 +1,6 @@
 """Tests for change feed handlers: get_cursor, get_root, get_changes."""
 
 import asyncio
-from datetime import UTC, datetime
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import MagicMock
 
@@ -27,7 +26,7 @@ from wcpan.drive.synology._server.workers import create_write_queue
 from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
-_EPOCH = datetime.fromtimestamp(0, UTC)
+_EPOCH = 0
 
 
 def _make_node(node_id: str = "n1", parent_id: str | None = "p1") -> NodeRecord:
@@ -36,8 +35,9 @@ def _make_node(node_id: str = "n1", parent_id: str | None = "p1") -> NodeRecord:
         parent_id=parent_id,
         name="x",
         is_directory=False,
-        ctime=_EPOCH,
-        mtime=_EPOCH,
+        created_time=_EPOCH,
+        modified_time=_EPOCH,
+        changed_time=_EPOCH,
         mime_type="text/plain",
         hash="abc",
         size=10,
@@ -131,8 +131,9 @@ class TestGetRoot(IsolatedAsyncioTestCase):
             parent_id=None,
             name="root",
             is_directory=True,
-            ctime=_EPOCH,
-            mtime=_EPOCH,
+            created_time=_EPOCH,
+            modified_time=_EPOCH,
+            changed_time=_EPOCH,
             mime_type="application/x-directory",
             hash="",
             size=0,

@@ -1,4 +1,4 @@
-"""Tests for time helpers and naive-datetime handling in lib."""
+"""Tests for time helpers and timestamp handling in lib."""
 
 from datetime import UTC, datetime
 from unittest import TestCase
@@ -28,9 +28,9 @@ class TestUtcFromTimestamp(TestCase):
 
 
 class TestUtcNow(TestCase):
-    def test_returns_patched_fixed_time(self):
+    def test_returns_patched_fixed_timestamp(self):
         # given
-        fixed = datetime(2022, 6, 15, 12, 30, 0, tzinfo=UTC)
+        fixed = int(datetime(2022, 6, 15, 12, 30, 0, tzinfo=UTC).timestamp())
         # when
         with patch("wcpan.drive.synology._lib.datetime", _FixedDateTime):
             result = utc_now()
@@ -38,8 +38,8 @@ class TestUtcNow(TestCase):
         self.assertEqual(result, fixed)
 
 
-class TestNodeRecordFromDictNaiveDatetime(TestCase):
-    def test_naive_ctime_mtime_get_utc(self):
+class TestNodeRecordFromDictTimestamp(TestCase):
+    def test_timestamps_are_preserved(self):
         # given
         data = {
             "id": "n1",
@@ -47,8 +47,9 @@ class TestNodeRecordFromDictNaiveDatetime(TestCase):
             "parent_id": None,
             "name": "f.txt",
             "is_directory": False,
-            "ctime": "2020-05-01T10:00:00",
-            "mtime": "2020-05-02T11:00:00",
+            "created_time": 1_588_327_200,
+            "modified_time": 1_588_417_200,
+            "changed_time": 1_588_507_200,
             "mime_type": "text/plain",
             "hash": "",
             "size": 0,
@@ -61,5 +62,6 @@ class TestNodeRecordFromDictNaiveDatetime(TestCase):
         # when
         record = node_record_from_dict(data)
         # then
-        self.assertEqual(record.ctime.tzinfo, UTC)
-        self.assertEqual(record.mtime.tzinfo, UTC)
+        self.assertEqual(record.created_time, 1_588_327_200)
+        self.assertEqual(record.modified_time, 1_588_417_200)
+        self.assertEqual(record.changed_time, 1_588_507_200)

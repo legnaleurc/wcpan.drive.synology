@@ -53,8 +53,9 @@ def _parent_node() -> Node:
         name="root",
         is_directory=True,
         is_trashed=False,
-        ctime=t,
-        mtime=t,
+        created_time=t,
+        modified_time=t,
+        changed_time=t,
         mime_type="application/x-directory",
         hash="",
         size=0,
@@ -84,15 +85,16 @@ class _Fake409Response:
 
 class TestCreateDirectory409(IsolatedAsyncioTestCase):
     def _node_body(self) -> dict:
-        t = datetime.now(UTC).isoformat()
+        t = 1_704_067_200
         return {
             "id": "existing-dir",
             "mutable_id": "existing-dir",
             "parent_id": "p",
             "name": "d",
             "is_directory": True,
-            "ctime": t,
-            "mtime": t,
+            "created_time": t,
+            "modified_time": t,
+            "changed_time": t,
             "mime_type": "application/x-directory",
             "hash": "",
             "size": 0,
@@ -167,7 +169,7 @@ class _FakeChangesSession:
 
 class TestGetChangesReplay(IsolatedAsyncioTestCase):
     def _node_change(self, node_id: str, parent_id: str | None = "p") -> dict[str, Any]:
-        t = datetime.now(UTC).isoformat()
+        t = 1_704_067_200
         return {
             "removed": False,
             "node": {
@@ -176,8 +178,9 @@ class TestGetChangesReplay(IsolatedAsyncioTestCase):
                 "parent_id": parent_id,
                 "name": node_id,
                 "is_directory": False,
-                "ctime": t,
-                "mtime": t,
+                "created_time": t,
+                "modified_time": t,
+                "changed_time": t,
                 "mime_type": "text/plain",
                 "hash": "",
                 "size": 1,

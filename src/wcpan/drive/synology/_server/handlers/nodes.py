@@ -5,7 +5,7 @@ from logging import getLogger
 from aiohttp import web
 from aiohttp.client_exceptions import ClientConnectionResetError
 
-from ..._lib import guess_mime_type, utc_from_timestamp, utc_now
+from ..._lib import guess_mime_type, utc_now
 from ...exceptions import (
     SynologyNetworkError,
     SynologyUploadConflictError,
@@ -149,8 +149,9 @@ async def create_node(request: web.Request) -> web.Response:
         parent_id=parent_id,
         name=info["name"],
         is_directory=True,
-        ctime=utc_from_timestamp(info.get("created_time", 0)),
-        mtime=utc_from_timestamp(info.get("modified_time", 0)),
+        created_time=info.get("created_time", 0),
+        modified_time=info.get("modified_time", 0),
+        changed_time=info.get("change_time", 0),
         mime_type="application/x-directory",
         hash="",
         size=0,
@@ -202,10 +203,9 @@ async def update_node(request: web.Request) -> web.Response:
             parent_id=updated_record.parent_id,
             name=info["name"],
             is_directory=updated_record.is_directory,
-            ctime=utc_from_timestamp(info.get("created_time", 0))
-            or updated_record.ctime,
-            mtime=utc_from_timestamp(info.get("modified_time", 0))
-            or updated_record.mtime,
+            created_time=info.get("created_time", 0) or updated_record.created_time,
+            modified_time=info.get("modified_time", 0) or updated_record.modified_time,
+            changed_time=info.get("change_time", 0) or updated_record.changed_time,
             mime_type=guess_mime_type(
                 info["name"], is_directory=updated_record.is_directory
             ),
@@ -243,8 +243,9 @@ async def update_node(request: web.Request) -> web.Response:
                 parent_id=new_parent_id,
                 name=updated_record.name,
                 is_directory=updated_record.is_directory,
-                ctime=updated_record.ctime,
-                mtime=utc_now(),
+                created_time=updated_record.created_time,
+                modified_time=updated_record.modified_time,
+                changed_time=utc_now(),
                 mime_type=updated_record.mime_type,
                 hash=updated_record.hash,
                 size=updated_record.size,

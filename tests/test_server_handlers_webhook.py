@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from datetime import UTC, datetime
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,7 +18,7 @@ from wcpan.drive.synology.types import MirrorMutableId, MirrorStableId, NodeReco
 logging.getLogger("wcpan.drive.synology._server").setLevel(logging.CRITICAL + 1)
 
 
-_EPOCH = datetime.fromtimestamp(0, UTC)
+_EPOCH = 0
 
 _FAKE_SYNO_INFO = {
     "file_id": "f1",
@@ -31,6 +30,7 @@ _FAKE_SYNO_INFO = {
     "size": 100,
     "created_time": 1000,
     "modified_time": 2000,
+    "change_time": 0,
     "sync_id": 1,
 }
 
@@ -44,8 +44,9 @@ def _make_node(
         parent_id=parent_id,
         name="test.txt",
         is_directory=False,
-        ctime=_EPOCH,
-        mtime=_EPOCH,
+        created_time=_EPOCH,
+        modified_time=_EPOCH,
+        changed_time=_EPOCH,
         mime_type="text/plain",
         hash="abc",
         size=100,

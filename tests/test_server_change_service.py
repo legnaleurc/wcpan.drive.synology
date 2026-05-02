@@ -1,7 +1,6 @@
 """Tests for NodeSyncService methods and _has_complete_media_dims."""
 
 import asyncio
-from datetime import UTC, datetime
 from functools import partial
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,7 +13,7 @@ from wcpan.drive.synology._server.types import MetadataWorkItem
 from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
-_EPOCH = datetime.fromtimestamp(0, UTC)
+_EPOCH = 0
 
 
 def _make_record(
@@ -32,8 +31,9 @@ def _make_record(
         parent_id="p1",
         name="test.txt",
         is_directory=is_directory,
-        ctime=_EPOCH,
-        mtime=_EPOCH,
+        created_time=_EPOCH,
+        modified_time=_EPOCH,
+        changed_time=_EPOCH,
         mime_type="text/plain",
         hash="",
         size=0,

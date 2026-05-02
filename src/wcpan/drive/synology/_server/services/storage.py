@@ -2,7 +2,6 @@ import logging
 import sqlite3
 from collections.abc import Generator
 from contextlib import closing, contextmanager
-from datetime import UTC, datetime
 from typing import Literal, TypedDict
 
 from ...types import MirrorMutableId, MirrorStableId, NodeRecord
@@ -41,8 +40,9 @@ CREATE TABLE IF NOT EXISTS nodes (
     parent_id    TEXT,
     name         TEXT    NOT NULL,
     is_directory INTEGER NOT NULL DEFAULT 0,
-    ctime        INTEGER NOT NULL,
-    mtime        INTEGER NOT NULL,
+    created_time INTEGER NOT NULL,
+    modified_time INTEGER NOT NULL,
+    changed_time INTEGER NOT NULL,
     mime_type    TEXT    NOT NULL DEFAULT '',
     hash         TEXT    NOT NULL DEFAULT '',
     size         INTEGER NOT NULL DEFAULT 0,
@@ -71,21 +71,22 @@ CREATE TABLE IF NOT EXISTS mounts (
 );
 """
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _MAX_CHANGES_PER_PAGE = 1000
 
 _UPSERT_NODE_SQL = """
             INSERT INTO nodes
-                (id, mutable_id, parent_id, name, is_directory, ctime, mtime,
+                (id, mutable_id, parent_id, name, is_directory, created_time, modified_time, changed_time,
                  mime_type, hash, size, is_image, is_video, width, height, ms_duration)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 mutable_id=excluded.mutable_id,
                 parent_id=excluded.parent_id,
                 name=excluded.name,
                 is_directory=excluded.is_directory,
-                ctime=excluded.ctime,
-                mtime=excluded.mtime,
+                created_time=excluded.created_time,
+                modified_time=excluded.modified_time,
+                changed_time=excluded.changed_time,
                 mime_type=excluded.mime_type,
                 hash=excluded.hash,
                 size=excluded.size,
@@ -100,16 +101,17 @@ _UPSERT_NODE_SQL = """
 # so that media info set by the API upload handler is not overwritten with zeros.
 _PRESERVE_MEDIA_UPSERT_SQL = """
             INSERT INTO nodes
-                (id, mutable_id, parent_id, name, is_directory, ctime, mtime,
+                (id, mutable_id, parent_id, name, is_directory, created_time, modified_time, changed_time,
                  mime_type, hash, size, is_image, is_video, width, height, ms_duration)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 mutable_id=excluded.mutable_id,
                 parent_id=excluded.parent_id,
                 name=excluded.name,
                 is_directory=excluded.is_directory,
-                ctime=excluded.ctime,
-                mtime=excluded.mtime,
+                created_time=excluded.created_time,
+                modified_time=excluded.modified_time,
+                changed_time=excluded.changed_time,
                 mime_type=excluded.mime_type,
                 hash=excluded.hash,
                 size=excluded.size,
@@ -124,7 +126,22 @@ _PRESERVE_MEDIA_UPSERT_SQL = """
 def _node_row_values(
     record: NodeRecord,
 ) -> tuple[
-    str, str, str | None, str, int, int, int, str, str, int, int, int, int, int, int
+    str,
+    str,
+    str | None,
+    str,
+    int,
+    int,
+    int,
+    int,
+    str,
+    str,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
 ]:
     return (
         str(record.id),
@@ -132,8 +149,9 @@ def _node_row_values(
         str(record.parent_id) if record.parent_id is not None else None,
         record.name,
         1 if record.is_directory else 0,
-        int(record.ctime.timestamp()),
-        int(record.mtime.timestamp()),
+        record.created_time,
+        record.modified_time,
+        record.changed_time,
         record.mime_type,
         record.hash,
         record.size,
@@ -481,7 +499,7 @@ def _get_changes_since(
                 """
             SELECT c.change_id, c.node_id, c.is_removed,
                    n.id,
-                   n.mutable_id, n.parent_id, n.name, n.is_directory, n.ctime, n.mtime,
+                   n.mutable_id, n.parent_id, n.name, n.is_directory, n.created_time, n.modified_time, n.changed_time,
                    n.mime_type, n.hash, n.size, n.is_image, n.is_video,
                    n.width, n.height, n.ms_duration
             FROM changes c
@@ -530,8 +548,9 @@ def _row_to_record(row: sqlite3.Row) -> NodeRecord:
         ),
         name=row["name"],
         is_directory=bool(row["is_directory"]),
-        ctime=datetime.fromtimestamp(row["ctime"], UTC),
-        mtime=datetime.fromtimestamp(row["mtime"], UTC),
+        created_time=row["created_time"],
+        modified_time=row["modified_time"],
+        changed_time=row["changed_time"],
         mime_type=row["mime_type"],
         hash=row["hash"],
         size=row["size"],

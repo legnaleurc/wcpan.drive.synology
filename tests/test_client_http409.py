@@ -1,6 +1,5 @@
 """Client parsing of 409 responses with a node record body."""
 
-from datetime import UTC, datetime
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock
 
@@ -9,15 +8,16 @@ from wcpan.drive.synology._client.http409 import node_from_409
 
 class TestNodeFrom409(IsolatedAsyncioTestCase):
     async def test_returns_node_when_body_has_id(self) -> None:
-        now = datetime.now(UTC).isoformat()
+        now = 1_704_067_200
         payload = {
             "id": "n1",
             "mutable_id": "n1",
             "parent_id": "p",
             "name": "x",
             "is_directory": True,
-            "ctime": now,
-            "mtime": now,
+            "created_time": now,
+            "modified_time": now,
+            "changed_time": now,
             "mime_type": "application/x-directory",
             "hash": "",
             "size": 0,

@@ -7,7 +7,6 @@ aiohttp.test_utils.TestClient.  No real Synology connection is needed.
 
 import asyncio
 import tempfile
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -51,7 +50,7 @@ from wcpan.drive.synology._server.workers import create_write_queue
 from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
-_EPOCH = datetime.fromtimestamp(0, UTC)
+_EPOCH = 0
 
 # Fake Synology file metadata returned by the patched upload_file call.
 _FAKE_SYNO_INFO = {
@@ -63,6 +62,7 @@ _FAKE_SYNO_INFO = {
     "size": 10,
     "created_time": 1_000_000,
     "modified_time": 1_000_000,
+    "change_time": 0,
     "hash": "abc123",
 }
 
@@ -102,8 +102,9 @@ def _make_app(
             parent_id=None,
             name="parent-a",
             is_directory=True,
-            ctime=_EPOCH,
-            mtime=_EPOCH,
+            created_time=_EPOCH,
+            modified_time=_EPOCH,
+            changed_time=_EPOCH,
             mime_type="application/x-directory",
             hash="",
             size=0,
@@ -297,16 +298,17 @@ class TestNodeRecordRoundTrip(IsolatedAsyncioTestCase):
         self._session_store.close_all()
         self._tmp.cleanup()
 
-    async def test_get_root_datetime_timezone_preserved(self) -> None:
-        """ctime/mtime timezone info is preserved through server JSON serialization."""
+    async def test_get_root_timestamps_preserved(self) -> None:
+        """Timestamps are preserved through server JSON serialization."""
         storage = _FakeStorage()
         root = NodeRecord(
             id=SERVER_ROOT_ID,
             parent_id=None,
             name="root",
             is_directory=True,
-            ctime=_EPOCH,
-            mtime=_EPOCH,
+            created_time=_EPOCH,
+            modified_time=_EPOCH,
+            changed_time=_EPOCH,
             mime_type="application/x-directory",
             hash="",
             size=0,
@@ -326,10 +328,8 @@ class TestNodeRecordRoundTrip(IsolatedAsyncioTestCase):
             record = node_record_from_dict(await resp.json())
 
         self.assertEqual(record.id, SERVER_ROOT_ID)
-        self.assertIsNotNone(record.ctime.tzinfo)
-        self.assertIsNotNone(record.mtime.tzinfo)
-        self.assertEqual(record.ctime, _EPOCH)
-        self.assertEqual(record.mtime, _EPOCH)
+        self.assertEqual(record.created_time, _EPOCH)
+        self.assertEqual(record.modified_time, _EPOCH)
 
 
 class TestNullUploadSink(IsolatedAsyncioTestCase):

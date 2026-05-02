@@ -3,7 +3,6 @@
 Each test uses given-when-then sections and unittest assertions.
 """
 
-from datetime import UTC, datetime
 from unittest import TestCase
 
 from wcpan.drive.synology._lib import (
@@ -16,7 +15,7 @@ from wcpan.drive.synology._lib import (
 from wcpan.drive.synology.types import MirrorMutableId, MirrorStableId, NodeRecord
 
 
-_NOW = datetime(2024, 1, 1, tzinfo=UTC)
+_NOW = 1_704_067_200
 
 
 def _make_record(
@@ -30,8 +29,9 @@ def _make_record(
         parent_id=parent_id,
         name=name,
         is_directory=is_directory,
-        ctime=_NOW,
-        mtime=_NOW,
+        created_time=_NOW,
+        modified_time=_NOW,
+        changed_time=_NOW,
         mime_type=FOLDER_MIME_TYPE if is_directory else "text/plain",
         hash="",
         size=0,
@@ -142,8 +142,9 @@ class TestNodeRecordRoundtrip(TestCase):
         self.assertIsInstance(restored.id, str)
         self.assertIsInstance(restored.parent_id, str)
         self.assertEqual(restored.name, record.name)
-        self.assertEqual(restored.ctime, record.ctime)
-        self.assertEqual(restored.mtime, record.mtime)
+        self.assertEqual(restored.created_time, record.created_time)
+        self.assertEqual(restored.modified_time, record.modified_time)
+        self.assertEqual(restored.changed_time, record.changed_time)
 
     def test_cjk_name(self):
         # given

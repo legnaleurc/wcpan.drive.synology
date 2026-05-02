@@ -51,6 +51,7 @@ _EXISTING_DIR = {
     "size": 0,
     "created_time": 1_700_000_000,
     "modified_time": 1_700_000_000,
+    "change_time": 0,
     "sync_id": 0,
 }
 
@@ -64,6 +65,7 @@ _EXISTING_FILE = {
     "size": 3,
     "created_time": 1_700_000_000,
     "modified_time": 1_700_000_000,
+    "change_time": 0,
     "sync_id": 0,
 }
 
@@ -90,16 +92,15 @@ class _FakeStorage:
 
 
 def _make_dir(node_id: str) -> NodeRecord:
-    from datetime import UTC, datetime
-
-    t = datetime.fromtimestamp(0, UTC)
+    t = 0
     return NodeRecord(
         id=node_id,
         parent_id=None,
         name=node_id,
         is_directory=True,
-        ctime=t,
-        mtime=t,
+        created_time=t,
+        modified_time=t,
+        changed_time=t,
         mime_type="application/x-directory",
         hash="",
         size=0,

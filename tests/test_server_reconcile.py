@@ -100,14 +100,15 @@ def _node(
     size: int = 0,
     width: int = 0,
 ) -> NodeRecord:
-    t = datetime(2024, 1, 1, tzinfo=UTC)
+    t = _TS
     return NodeRecord(
         id=node_id,
         parent_id=parent_id,
         name=name,
         is_directory=is_directory,
-        ctime=t,
-        mtime=t,
+        created_time=t,
+        modified_time=t,
+        changed_time=t,
         mime_type=FOLDER_MIME_TYPE if is_directory else "text/plain",
         hash="",
         size=size,
@@ -139,6 +140,7 @@ def _syno_item(
         "size": size,
         "created_time": created_time,
         "modified_time": modified_time,
+        "change_time": 0,
         "sync_id": 1,
     }
 

@@ -127,7 +127,7 @@ class TestEnsureSchemaVersion(IsolatedAsyncioTestCase):
         version = con.execute("PRAGMA user_version").fetchone()[0]
         con.close()
 
-        self.assertEqual(version, 2)
+        self.assertEqual(version, 3)
 
     async def test_existing_db_with_matching_version_is_accepted(self) -> None:
         storage = StorageService(self.db_path, off_main=self.off_main)

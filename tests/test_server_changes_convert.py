@@ -3,7 +3,6 @@
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -34,6 +33,7 @@ class TestConvertSynologyFileInfo(TestCase):
             "size": 0,
             "created_time": 1700000000,
             "modified_time": 1700003600,
+            "change_time": 0,
             "sync_id": 5,
         }
         parent_id = "_mount"
@@ -44,8 +44,8 @@ class TestConvertSynologyFileInfo(TestCase):
         self.assertEqual(record.mime_type, FOLDER_MIME_TYPE)
         self.assertEqual(record.id, "d1")
         self.assertEqual(record.parent_id, parent_id)
-        self.assertEqual(record.ctime, datetime.fromtimestamp(1700000000, UTC))
-        self.assertEqual(record.mtime, datetime.fromtimestamp(1700003600, UTC))
+        self.assertEqual(record.created_time, 1700000000)
+        self.assertEqual(record.modified_time, 1700003600)
 
     def test_file_with_image_content_type(self):
         # given
@@ -60,6 +60,7 @@ class TestConvertSynologyFileInfo(TestCase):
             "size": 1024,
             "created_time": 0,
             "modified_time": 0,
+            "change_time": 0,
             "sync_id": 1,
         }
         # when
@@ -83,6 +84,7 @@ class TestConvertSynologyFileInfo(TestCase):
             "size": 999,
             "created_time": 0,
             "modified_time": 0,
+            "change_time": 0,
             "sync_id": 2,
         }
         # when
@@ -102,6 +104,7 @@ class TestConvertSynologyFileInfo(TestCase):
             "size": 10,
             "created_time": 0,
             "modified_time": 0,
+            "change_time": 0,
             "sync_id": 1,
             "image_metadata": {"width": 1920, "height": 1080},
         }
@@ -121,6 +124,7 @@ class TestConvertSynologyFileInfo(TestCase):
             "size": 10,
             "created_time": 0,
             "modified_time": 0,
+            "change_time": 0,
             "sync_id": 1,
             "image_metadata": {"resolution": {"width": 640, "height": 480}},
         }
@@ -139,6 +143,7 @@ class TestConvertSynologyFileInfo(TestCase):
             "size": 100,
             "created_time": 0,
             "modified_time": 0,
+            "change_time": 0,
             "sync_id": 2,
             "image_metadata": {
                 "width": 1280,
@@ -165,6 +170,7 @@ class TestEnrichPreservesApiDimensions(IsolatedAsyncioTestCase):
                 "size": 10,
                 "created_time": 0,
                 "modified_time": 0,
+                "change_time": 0,
                 "sync_id": 1,
             },
             parent_id="par",
@@ -198,6 +204,7 @@ class TestEnrichPreservesApiDimensions(IsolatedAsyncioTestCase):
                 "size": 10,
                 "created_time": 0,
                 "modified_time": 0,
+                "change_time": 0,
                 "sync_id": 1,
             },
             parent_id="par",
@@ -261,6 +268,7 @@ class TestNodeSyncServiceMetadataQueue(IsolatedAsyncioTestCase):
                 "size": 1,
                 "created_time": 0,
                 "modified_time": 0,
+                "change_time": 0,
                 "sync_id": 1,
             }
             record = _convert(info, parent_id="par")

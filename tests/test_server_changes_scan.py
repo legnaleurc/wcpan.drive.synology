@@ -5,7 +5,6 @@ import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, suppress
-from datetime import UTC, datetime
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -35,14 +34,15 @@ def _node(
     is_directory: bool = False,
     mutable_id: MirrorMutableId = MirrorMutableId(""),
 ) -> NodeRecord:
-    t = datetime(2024, 1, 1, tzinfo=UTC)
+    t = 1_704_067_200
     return NodeRecord(
         id=node_id,
         parent_id=parent_id,
         name=name,
         is_directory=is_directory,
-        ctime=t,
-        mtime=t,
+        created_time=t,
+        modified_time=t,
+        changed_time=t,
         mime_type=FOLDER_MIME_TYPE if is_directory else "text/plain",
         hash="",
         size=0,
@@ -74,6 +74,7 @@ def _syno_item(
         "size": 0,
         "created_time": 0,
         "modified_time": 0,
+        "change_time": 0,
         "sync_id": sync_id,
         "max_id": mid,
     }

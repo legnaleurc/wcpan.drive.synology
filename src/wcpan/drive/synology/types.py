@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from datetime import datetime
 from typing import NewType
 
 
@@ -20,8 +19,9 @@ class NodeRecord:
     parent_id: MirrorStableId | None
     name: str
     is_directory: bool
-    ctime: datetime
-    mtime: datetime
+    created_time: int
+    modified_time: int
+    changed_time: int
     mime_type: str
     hash: str
     size: int

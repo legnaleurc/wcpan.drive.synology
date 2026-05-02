@@ -2,7 +2,6 @@
 
 import asyncio
 import tempfile
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -44,7 +43,7 @@ from wcpan.drive.synology.exceptions import (
 from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
-_EPOCH = datetime.fromtimestamp(0, UTC)
+_EPOCH = 0
 
 _FAKE_SYNO_INFO = {
     "file_id": "new-dir",
@@ -55,6 +54,7 @@ _FAKE_SYNO_INFO = {
     "size": 0,
     "created_time": 1_000_000,
     "modified_time": 1_000_000,
+    "change_time": 0,
     "sync_id": 1,
 }
 
@@ -95,8 +95,9 @@ def _make_node(
         parent_id=parent_id,
         name=name,
         is_directory=is_directory,
-        ctime=_EPOCH,
-        mtime=_EPOCH,
+        created_time=_EPOCH,
+        modified_time=_EPOCH,
+        changed_time=_EPOCH,
         mime_type=mime_type,
         hash="abc",
         size=size,
@@ -119,8 +120,9 @@ def _make_dir(
         parent_id=parent_id,
         name=name or node_id,
         is_directory=True,
-        ctime=_EPOCH,
-        mtime=_EPOCH,
+        created_time=_EPOCH,
+        modified_time=_EPOCH,
+        changed_time=_EPOCH,
         mime_type="application/x-directory",
         hash="",
         size=0,
@@ -267,6 +269,7 @@ class TestUpdateNode(IsolatedAsyncioTestCase):
             "name": "renamed.txt",
             "created_time": 1000,
             "modified_time": 2000,
+            "change_time": 0,
             "hash": "abc",
             "size": 100,
         }
@@ -327,6 +330,7 @@ class TestUpdateNode(IsolatedAsyncioTestCase):
                     "size": 100,
                     "created_time": 1000,
                     "modified_time": 2000,
+                    "change_time": 0,
                     "sync_id": 1,
                     "hash": "def",
                 },
@@ -454,6 +458,7 @@ class TestUploadNode(IsolatedAsyncioTestCase):
             "size": 5,
             "created_time": 1000,
             "modified_time": 1000,
+            "change_time": 0,
             "sync_id": 1,
         }
         with patch.object(
@@ -526,6 +531,7 @@ class TestUploadNode(IsolatedAsyncioTestCase):
                 "size": 0,
                 "created_time": 1000,
                 "modified_time": 1000,
+                "change_time": 0,
                 "sync_id": 0,
             }
         )
@@ -541,6 +547,7 @@ class TestUploadNode(IsolatedAsyncioTestCase):
                 "size": 5,
                 "created_time": 1000,
                 "modified_time": 1000,
+                "change_time": 0,
                 "sync_id": 1,
             }
         )

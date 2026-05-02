@@ -1,6 +1,5 @@
 """Tests for resolve_local_path (no disk / pymediainfo)."""
 
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest import TestCase
 
@@ -17,14 +16,15 @@ def _node(
     *,
     is_directory: bool = False,
 ) -> NodeRecord:
-    t = datetime(2024, 1, 1, tzinfo=UTC)
+    t = 1_704_067_200
     return NodeRecord(
         id=node_id,
         parent_id=parent_id,
         name=name,
         is_directory=is_directory,
-        ctime=t,
-        mtime=t,
+        created_time=t,
+        modified_time=t,
+        changed_time=t,
         mime_type="application/octet-stream",
         hash="",
         size=0,

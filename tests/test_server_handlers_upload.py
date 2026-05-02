@@ -223,6 +223,7 @@ class TestCreateUploadSession(IsolatedAsyncioTestCase):
                 "size": 0,
                 "created_time": 0,
                 "modified_time": 0,
+                "change_time": 0,
                 "sync_id": 0,
             }
         )
@@ -238,6 +239,7 @@ class TestCreateUploadSession(IsolatedAsyncioTestCase):
                 "size": 512,
                 "created_time": 0,
                 "modified_time": 0,
+                "change_time": 0,
                 "sync_id": 1,
             }
         )
@@ -428,21 +430,20 @@ class TestPatchUploadChunk(IsolatedAsyncioTestCase):
             await patch_upload_chunk(req)
 
     async def test_final_chunk_triggers_synology_upload(self):
-        from datetime import UTC, datetime
-
         from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
         session = self._make_session(total=50)
         chunk = b"y" * 50
 
-        now = datetime(2024, 1, 1, tzinfo=UTC)
+        now = 1_704_067_200
         node_record = NodeRecord(
             id="new-node-1",
             parent_id="p1",
             name="f.bin",
             is_directory=False,
-            ctime=now,
-            mtime=now,
+            created_time=now,
+            modified_time=now,
+            changed_time=now,
             mime_type="application/octet-stream",
             hash="abc",
             size=50,
@@ -470,6 +471,7 @@ class TestPatchUploadChunk(IsolatedAsyncioTestCase):
                     "size": 50,
                     "created_time": 0,
                     "modified_time": 0,
+                    "change_time": 0,
                     "sync_id": 1,
                 },
             ),
