@@ -1,7 +1,7 @@
 """Integration tests for the client–server HTTP contract.
 
 These tests spin up the real aiohttp handlers against a minimal in-process
-app (fake Storage, stub OffMainThreadService) and make actual HTTP requests via
+app (fake Storage, stub OffMainService) and make actual HTTP requests via
 aiohttp.test_utils.TestClient.  No real Synology connection is needed.
 """
 

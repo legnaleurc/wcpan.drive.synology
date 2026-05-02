@@ -4,10 +4,10 @@ from concurrent.futures import Executor
 from functools import partial
 
 
-_OFF_MAIN_TIMEOUT = 60.0  # seconds — crash if any DB op hangs this long
+_OFF_MAIN_TIMEOUT = 60.0  # seconds - crash if any DB op hangs this long
 
 
-class OffMainThreadService:
+class OffMainService:
     def __init__(self, *, pool: Executor) -> None:
         self._pool = pool
 

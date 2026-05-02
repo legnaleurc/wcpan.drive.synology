@@ -6,7 +6,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from unittest import IsolatedAsyncioTestCase
 
-from wcpan.drive.synology._server.services.off_main import OffMainThreadService
+from wcpan.drive.synology._server.services.off_main import OffMainService
 from wcpan.drive.synology._server.services.storage import (
     SchemaVersionError,
     StorageService,
@@ -19,7 +19,7 @@ class TestGetMountMaxIds(IsolatedAsyncioTestCase):
         os.close(fd)
         self.pool = ThreadPoolExecutor()
         self.storage = StorageService(
-            self.db_path, off_main=OffMainThreadService(pool=self.pool)
+            self.db_path, off_main=OffMainService(pool=self.pool)
         )
         await self.storage.ensure_schema()
 
@@ -69,7 +69,7 @@ class TestSetMountState(IsolatedAsyncioTestCase):
         os.close(fd)
         self.pool = ThreadPoolExecutor()
         self.storage = StorageService(
-            self.db_path, off_main=OffMainThreadService(pool=self.pool)
+            self.db_path, off_main=OffMainService(pool=self.pool)
         )
         await self.storage.ensure_schema()
 
@@ -114,7 +114,7 @@ class TestEnsureSchemaVersion(IsolatedAsyncioTestCase):
         fd, self.db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         self.pool = ThreadPoolExecutor()
-        self.off_main = OffMainThreadService(pool=self.pool)
+        self.off_main = OffMainService(pool=self.pool)
 
     async def asyncTearDown(self) -> None:
         self.pool.shutdown(wait=False, cancel_futures=True)

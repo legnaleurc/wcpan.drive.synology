@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest import IsolatedAsyncioTestCase
 
 from wcpan.drive.synology._lib import FOLDER_MIME_TYPE
-from wcpan.drive.synology._server.services.off_main import OffMainThreadService
+from wcpan.drive.synology._server.services.off_main import OffMainService
 from wcpan.drive.synology._server.services.paths import SERVER_ROOT_ID
 from wcpan.drive.synology._server.services.storage import StorageService
 from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
@@ -42,7 +42,7 @@ def _make_node(
 
 
 def _make_storage(db_path: str, pool: ThreadPoolExecutor) -> StorageService:
-    return StorageService(db_path, off_main=OffMainThreadService(pool=pool))
+    return StorageService(db_path, off_main=OffMainService(pool=pool))
 
 
 class TestStorageChangesPaging(IsolatedAsyncioTestCase):

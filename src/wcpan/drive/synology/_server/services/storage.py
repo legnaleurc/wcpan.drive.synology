@@ -7,7 +7,7 @@ from typing import Literal, TypedDict
 from ...types import MirrorMutableId, MirrorStableId, NodeRecord
 from ..lib.mounts import SERVER_ROOT_ID
 from ..types import SynologyPath
-from .off_main import OffMainThreadService
+from .off_main import OffMainService
 
 
 _L = logging.getLogger(__name__)
@@ -690,9 +690,9 @@ def _resolve_path_to_id(dsn: str, segments: list[str]) -> MirrorStableId | None:
 
 
 class StorageService:
-    """Async SQLite access — delegates blocking calls to OffMainThreadService."""
+    """Async SQLite access - delegates blocking calls to OffMainService."""
 
-    def __init__(self, dsn: str, *, off_main: OffMainThreadService) -> None:
+    def __init__(self, dsn: str, *, off_main: OffMainService) -> None:
         self._dsn = dsn
         self._off_main = off_main
 
@@ -797,7 +797,7 @@ class StorageService:
 async def create_storage_service(
     database_url: str,
     *,
-    off_main: OffMainThreadService,
+    off_main: OffMainService,
 ) -> StorageService:
     storage = StorageService(database_url, off_main=off_main)
     _L.info("initializing database: %s", database_url)

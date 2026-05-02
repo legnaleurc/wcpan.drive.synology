@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncGenerator, Coroutine, Generator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from logging import getLogger
 from pathlib import Path
@@ -41,7 +41,7 @@ from .keys import (
     WRITE_QUEUE_KEY,
 )
 from .lib.mounts import MountRegistry, create_mount_registry
-from .services.off_main import OffMainThreadService
+from .services.off_main import OffMainService
 from .services.paths import SynologyPathService
 from .services.scan import StartupScanService
 from .services.storage import StorageService, create_storage_service
@@ -64,8 +64,8 @@ _L = getLogger(__name__)
 
 
 @contextmanager
-def _managed_pool() -> Generator[ThreadPoolExecutor, None, None]:
-    pool = ThreadPoolExecutor()
+def _managed_pool() -> Generator[ProcessPoolExecutor, None, None]:
+    pool = ProcessPoolExecutor()
     try:
         yield pool
     finally:
@@ -111,9 +111,9 @@ async def _managed_webhook(
 
 
 @asynccontextmanager
-async def managed_off_main() -> AsyncGenerator[OffMainThreadService, None]:
+async def managed_off_main() -> AsyncGenerator[OffMainService, None]:
     with _managed_pool() as pool:
-        off_main = OffMainThreadService(pool=pool)
+        off_main = OffMainService(pool=pool)
         yield off_main
 
 

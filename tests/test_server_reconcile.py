@@ -17,7 +17,7 @@ from wcpan.drive.synology._server.lib.mounts import (
     mount_id,
 )
 from wcpan.drive.synology._server.services.backfill import BackfillService
-from wcpan.drive.synology._server.services.off_main import OffMainThreadService
+from wcpan.drive.synology._server.services.off_main import OffMainService
 from wcpan.drive.synology._server.services.paths import (
     SynologyPathService,
     VirtualPathService,
@@ -50,7 +50,7 @@ async def _reconcile_with_worker(
     q = create_write_queue()
     mq = create_metadata_queue()
     with ThreadPoolExecutor(2) as pool:
-        off_main = OffMainThreadService(pool=pool)
+        off_main = OffMainService(pool=pool)
         cs = NodeSyncService(
             storage=storage,
             write_queue=q,
@@ -150,9 +150,7 @@ class TestVirtualPathToDirectoryNodeId(IsolatedAsyncioTestCase):
         fd, self.db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         self.pool = ThreadPoolExecutor()
-        storage = StorageService(
-            self.db_path, off_main=OffMainThreadService(pool=self.pool)
-        )
+        storage = StorageService(self.db_path, off_main=OffMainService(pool=self.pool))
         await storage.ensure_schema()
         await storage.bulk_upsert_nodes(
             [
@@ -206,9 +204,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(
-                    db_path, off_main=OffMainThreadService(pool=pool)
-                )
+                storage = StorageService(db_path, off_main=OffMainService(pool=pool))
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -252,9 +248,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(
-                    db_path, off_main=OffMainThreadService(pool=pool)
-                )
+                storage = StorageService(db_path, off_main=OffMainService(pool=pool))
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -295,9 +289,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(
-                    db_path, off_main=OffMainThreadService(pool=pool)
-                )
+                storage = StorageService(db_path, off_main=OffMainService(pool=pool))
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -341,9 +333,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(
-                    db_path, off_main=OffMainThreadService(pool=pool)
-                )
+                storage = StorageService(db_path, off_main=OffMainService(pool=pool))
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -383,9 +373,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(
-                    db_path, off_main=OffMainThreadService(pool=pool)
-                )
+                storage = StorageService(db_path, off_main=OffMainService(pool=pool))
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -423,9 +411,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(
-                    db_path, off_main=OffMainThreadService(pool=pool)
-                )
+                storage = StorageService(db_path, off_main=OffMainService(pool=pool))
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [
@@ -467,9 +453,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(
-                    db_path, off_main=OffMainThreadService(pool=pool)
-                )
+                storage = StorageService(db_path, off_main=OffMainService(pool=pool))
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
                     [

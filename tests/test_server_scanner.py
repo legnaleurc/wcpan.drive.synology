@@ -9,7 +9,7 @@ from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from wcpan.drive.synology._server.lib.mounts import MountRegistry
-from wcpan.drive.synology._server.services.off_main import OffMainThreadService
+from wcpan.drive.synology._server.services.off_main import OffMainService
 from wcpan.drive.synology._server.services.paths import SynologyPathService
 from wcpan.drive.synology._server.services.scan import StartupScanService
 from wcpan.drive.synology._server.services.storage import StorageService
@@ -41,7 +41,7 @@ class TestScannerWriteBack(IsolatedAsyncioTestCase):
             pre_scan_result = scan_result
         q = create_write_queue()
         with ThreadPoolExecutor(2) as pool:
-            off_main = OffMainThreadService(pool=pool)
+            off_main = OffMainService(pool=pool)
             cs = NodeSyncService(
                 storage=storage,
                 write_queue=q,
@@ -79,9 +79,7 @@ class TestScannerWriteBack(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(
-                    db_path, off_main=OffMainThreadService(pool=pool)
-                )
+                storage = StorageService(db_path, off_main=OffMainService(pool=pool))
                 await storage.ensure_schema()
                 mounts = {"a": "/vol/a", "b": "/vol/b"}
 
@@ -98,9 +96,7 @@ class TestScannerWriteBack(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(
-                    db_path, off_main=OffMainThreadService(pool=pool)
-                )
+                storage = StorageService(db_path, off_main=OffMainService(pool=pool))
                 await storage.ensure_schema()
                 mounts = {"a": "/vol/a", "b": "/vol/b"}
                 # Seed existing per-mount state
@@ -120,9 +116,7 @@ class TestScannerWriteBack(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(
-                    db_path, off_main=OffMainThreadService(pool=pool)
-                )
+                storage = StorageService(db_path, off_main=OffMainService(pool=pool))
                 await storage.ensure_schema()
                 mounts = {"a": "/vol/a", "b": "/vol/b"}
                 await storage.set_mount_state("a", "/vol/a", 100)
@@ -147,9 +141,7 @@ class TestScannerWriteBack(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor() as pool:
-                storage = StorageService(
-                    db_path, off_main=OffMainThreadService(pool=pool)
-                )
+                storage = StorageService(db_path, off_main=OffMainService(pool=pool))
                 await storage.ensure_schema()
                 mounts = {"a": "/vol/a"}
 

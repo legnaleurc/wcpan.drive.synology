@@ -2,7 +2,7 @@ from aiohttp.web import AppKey
 
 from .api.drive import SynologyDriveApi
 from .lib.mounts import MountRegistry
-from .services.off_main import OffMainThreadService
+from .services.off_main import OffMainService
 from .services.paths import SynologyPathService
 from .services.storage import StorageService
 from .services.sync import NodeSyncService
@@ -13,7 +13,7 @@ from .workers import WebhookQueue
 
 CONFIG_KEY = AppKey[ServerConfig]("server_config")
 MOUNT_REGISTRY_KEY = AppKey[MountRegistry]("mount_registry")
-OFF_MAIN_KEY = AppKey[OffMainThreadService]("off_main")
+OFF_MAIN_KEY = AppKey[OffMainService]("off_main")
 WRITE_QUEUE_KEY = AppKey[WriteQueue]("write_queue")
 STORAGE_KEY = AppKey[StorageService]("storage")
 SYNOLOGY_DRIVE_API_KEY = AppKey[SynologyDriveApi]("synology_drive_api")

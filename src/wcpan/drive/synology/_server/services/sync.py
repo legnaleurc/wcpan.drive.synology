@@ -5,7 +5,7 @@ from functools import partial
 from ...types import MirrorStableId, NodeRecord
 from ..types import MetadataQueue, MetadataWorkItem, SynologyPath, WriteQueue
 from .enricher import MediaEnrichService
-from .off_main import OffMainThreadService
+from .off_main import OffMainService
 from .paths import LocalPathService
 from .storage import StorageService
 
@@ -35,7 +35,7 @@ class NodeSyncService:
         *,
         storage: StorageService,
         write_queue: WriteQueue,
-        off_main: OffMainThreadService,
+        off_main: OffMainService,
         mounts: dict[str, SynologyPath],
         local_paths: dict[str, str],
         metadata_queue: MetadataQueue,

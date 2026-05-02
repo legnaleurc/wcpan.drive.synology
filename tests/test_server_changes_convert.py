@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from wcpan.drive.synology._lib import FOLDER_MIME_TYPE
 from wcpan.drive.synology._server.api.lib import convert_file_info as _convert
 from wcpan.drive.synology._server.services.enricher import MediaEnrichService
-from wcpan.drive.synology._server.services.off_main import OffMainThreadService
+from wcpan.drive.synology._server.services.off_main import OffMainService
 from wcpan.drive.synology._server.services.paths import LocalPathService
 from wcpan.drive.synology._server.services.sync import NodeSyncService
 from wcpan.drive.synology._server.types import MetadataWorkItem
@@ -214,7 +214,7 @@ class TestEnrichPreservesApiDimensions(IsolatedAsyncioTestCase):
             probe_path = Path(tmp.name)
         try:
             with ThreadPoolExecutor(1) as pool:
-                off_main = OffMainThreadService(pool=pool)
+                off_main = OffMainService(pool=pool)
                 local_path_svc = LocalPathService(
                     storage=MagicMock(),
                     mounts={},
@@ -248,7 +248,7 @@ class TestNodeSyncServiceMetadataQueue(IsolatedAsyncioTestCase):
         wq = create_write_queue()
         mq = create_metadata_queue()
         with ThreadPoolExecutor(1) as pool:
-            off_main = OffMainThreadService(pool=pool)
+            off_main = OffMainService(pool=pool)
             storage = MagicMock()
             cs = NodeSyncService(
                 storage=storage,

@@ -8,7 +8,7 @@ from typing import Any
 from pymediainfo import MediaInfo  # type: ignore[import-untyped]
 
 from ...types import NodeRecord
-from .off_main import OffMainThreadService
+from .off_main import OffMainService
 from .paths import LocalPathService
 
 
@@ -16,7 +16,7 @@ _L = getLogger(__name__)
 
 
 def _probe_sync(path: Path, *, is_image: bool) -> tuple[int, int, int] | None:
-    """Probe width, height, ms_duration using pymediainfo. Runs in a thread."""
+    """Probe width, height, ms_duration using pymediainfo off the event loop."""
     opts = {"File_TestContinuousFileNames": "0"} if is_image else {}
     try:
         info: Any = MediaInfo.parse(str(path), mediainfo_options=opts)
@@ -45,7 +45,7 @@ class MediaEnrichService:
         self,
         *,
         local_path_service: LocalPathService,
-        off_main: OffMainThreadService | None = None,
+        off_main: OffMainService | None = None,
     ) -> None:
         self._local_path_service = local_path_service
         self._off_main = off_main

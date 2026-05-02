@@ -1,35 +1,35 @@
-"""Tests for OffMainThreadService executor bridge."""
+"""Tests for OffMainService executor bridge."""
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from unittest import IsolatedAsyncioTestCase
 
-from wcpan.drive.synology._server.services.off_main import OffMainThreadService
+from wcpan.drive.synology._server.services.off_main import OffMainService
 
 
-class TestOffMainThreadService(IsolatedAsyncioTestCase):
+def _triple(x: int) -> int:
+    return x * 3
+
+
+def _concat(a: str, b: str) -> str:
+    return a + b
+
+
+class TestOffMainService(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        self._pool = ThreadPoolExecutor(max_workers=2)
-        self._off = OffMainThreadService(pool=self._pool)
+        self._pool = ProcessPoolExecutor(max_workers=2)
+        self._off = OffMainService(pool=self._pool)
 
     async def asyncTearDown(self) -> None:
         self._pool.shutdown(wait=True)
 
     async def test_runs_callable_on_executor(self):
-        # given
-        def triple(x: int) -> int:
-            return x * 3
-
         # when
-        result = await self._off(triple, 4)
+        result = await self._off(_triple, 4)
         # then
         self.assertEqual(result, 12)
 
     async def test_untimed_runs_on_executor(self):
-        # given
-        def concat(a: str, b: str) -> str:
-            return a + b
-
         # when
-        result = await self._off.untimed(concat, "foo", "bar")
+        result = await self._off.untimed(_concat, "foo", "bar")
         # then
         self.assertEqual(result, "foobar")

@@ -16,7 +16,7 @@ from wcpan.drive.synology._server.lib.mounts import (
     mount_id,
     mount_name,
 )
-from wcpan.drive.synology._server.services.off_main import OffMainThreadService
+from wcpan.drive.synology._server.services.off_main import OffMainService
 from wcpan.drive.synology._server.services.paths import SynologyPathService
 from wcpan.drive.synology._server.services.scan import StartupScanService
 from wcpan.drive.synology._server.services.storage import StorageService
@@ -133,7 +133,7 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool=pool)
+                off_main = OffMainService(pool=pool)
                 storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
@@ -207,7 +207,7 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool=pool)
+                off_main = OffMainService(pool=pool)
                 storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
@@ -290,7 +290,7 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool=pool)
+                off_main = OffMainService(pool=pool)
                 storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
@@ -364,7 +364,7 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool=pool)
+                off_main = OffMainService(pool=pool)
                 storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
@@ -439,7 +439,7 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool=pool)
+                off_main = OffMainService(pool=pool)
                 storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
@@ -513,7 +513,7 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool=pool)
+                off_main = OffMainService(pool=pool)
                 storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
@@ -594,7 +594,7 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool=pool)
+                off_main = OffMainService(pool=pool)
                 storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
@@ -693,7 +693,7 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool=pool)
+                off_main = OffMainService(pool=pool)
                 storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
@@ -764,7 +764,7 @@ class TestDeferredScan(IsolatedAsyncioTestCase):
         os.close(fd)
         try:
             with ThreadPoolExecutor(2) as pool:
-                off_main = OffMainThreadService(pool=pool)
+                off_main = OffMainService(pool=pool)
                 storage = StorageService(db_path, off_main=off_main)
                 await storage.ensure_schema()
                 await storage.bulk_upsert_nodes(
