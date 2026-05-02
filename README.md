@@ -111,7 +111,7 @@ Synology's public docs do not appear to spell it out explicitly.
 - Python >= 3.13
 - aiohttp >= 3.13.0
 - pycryptodome >= 3.0
-- wcpan-drive-core >= 5.0.6
+- wcpan-drive-core >= 6.0.0
 
 Server extras additionally require: dacite, pyyaml, pymediainfo, wcpan-logging.
 
