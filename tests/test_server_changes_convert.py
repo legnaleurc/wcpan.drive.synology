@@ -9,7 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from wcpan.drive.synology._lib import FOLDER_MIME_TYPE
 from wcpan.drive.synology._server.api.lib import convert_file_info as _convert
-from wcpan.drive.synology._server.services.enricher import MediaEnrichService
+from wcpan.drive.synology._server.services.enricher import (
+    MediaEnrichmentError,
+    MediaEnrichService,
+)
 from wcpan.drive.synology._server.services.off_main import OffMainService
 from wcpan.drive.synology._server.services.paths import LocalPathService
 from wcpan.drive.synology._server.services.sync import NodeSyncService
@@ -239,6 +242,53 @@ class TestEnrichPreservesApiDimensions(IsolatedAsyncioTestCase):
             probe.assert_called_once()
             self.assertEqual(out.width, 100)
             self.assertEqual(out.height, 200)
+        finally:
+            probe_path.unlink(missing_ok=True)
+
+    async def test_enrich_raises_when_required_probe_fails(self) -> None:
+        record = _convert(
+            {
+                "file_id": "f6",
+                "permanent_link": "f6",
+                "parent_id": "p",
+                "name": "broken.png",
+                "type": "file",
+                "content_type": "image",
+                "size": 10,
+                "created_time": 0,
+                "modified_time": 0,
+                "change_time": 0,
+                "sync_id": 1,
+            },
+            parent_id="par",
+        )
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            probe_path = Path(tmp.name)
+        try:
+            with ThreadPoolExecutor(1) as pool:
+                off_main = OffMainService(pool=pool)
+                local_path_svc = LocalPathService(
+                    storage=MagicMock(),
+                    mounts={},
+                    local_paths={"docs": "/tmp"},
+                )
+                enricher = MediaEnrichService(
+                    local_path_service=local_path_svc,
+                    off_main=off_main,
+                )
+                with (
+                    patch.object(
+                        local_path_svc,
+                        "resolve_local_path",
+                        new=AsyncMock(return_value=probe_path),
+                    ),
+                    patch(
+                        "wcpan.drive.synology._server.services.enricher._probe_sync",
+                        side_effect=ValueError("bad media"),
+                    ),
+                ):
+                    with self.assertRaises(MediaEnrichmentError):
+                        await enricher.enrich(record, force_refresh=True)
         finally:
             probe_path.unlink(missing_ok=True)
 

@@ -1,7 +1,6 @@
 """Media dimensions from local disk — applied before each upsert that emits a change."""
 
 from dataclasses import replace
-from logging import getLogger
 from pathlib import Path
 from typing import Any
 
@@ -12,17 +11,17 @@ from .off_main import OffMainService
 from .paths import LocalPathService
 
 
-_L = getLogger(__name__)
+class MediaEnrichmentError(RuntimeError):
+    def __init__(self, record: NodeRecord, path: Path) -> None:
+        super().__init__(f"failed to enrich {record.id} from {path}")
+        self.record = record
+        self.path = path
 
 
 def _probe_sync(path: Path, *, is_image: bool) -> tuple[int, int, int] | None:
     """Probe width, height, ms_duration using pymediainfo off the event loop."""
     opts = {"File_TestContinuousFileNames": "0"} if is_image else {}
-    try:
-        info: Any = MediaInfo.parse(str(path), mediainfo_options=opts)
-    except Exception:
-        _L.warning("Failed to probe %s", path, exc_info=True)
-        return None
+    info: Any = MediaInfo.parse(str(path), mediainfo_options=opts)
 
     width = 0
     height = 0
@@ -77,14 +76,17 @@ class MediaEnrichService:
         if local_path is None or not local_path.exists():
             return record
 
-        result = await off_main.untimed(
-            _probe_sync, local_path, is_image=record.is_image
-        )
+        try:
+            result = await off_main.untimed(
+                _probe_sync, local_path, is_image=record.is_image
+            )
+        except Exception as e:
+            raise MediaEnrichmentError(record, local_path) from e
         if result is None:
-            return record
+            raise MediaEnrichmentError(record, local_path)
         w, h, ms = result
         if w == 0 and h == 0:
-            return record
+            raise MediaEnrichmentError(record, local_path)
 
         return replace(
             record,

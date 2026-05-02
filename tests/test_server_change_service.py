@@ -1,10 +1,13 @@
 """Tests for NodeSyncService methods and _has_complete_media_dims."""
 
 import asyncio
+import logging
 from functools import partial
+from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from wcpan.drive.synology._server.services.enricher import MediaEnrichmentError
 from wcpan.drive.synology._server.services.sync import (
     NodeSyncService,
     _has_complete_media_dims,
@@ -14,6 +17,10 @@ from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
 _EPOCH = 0
+
+logging.getLogger("wcpan.drive.synology._server.services.sync").setLevel(
+    logging.CRITICAL + 1
+)
 
 
 def _make_record(
@@ -185,6 +192,18 @@ class TestNodeSyncServiceUpsert(IsolatedAsyncioTestCase):
         await op()
         self.assertIn("n1", storage._nodes)
 
+    async def test_enrichment_failure_skips_write(self):
+        cs, _, wq = _make_service()
+        record = _make_record(is_image=True)
+        with patch(
+            "wcpan.drive.synology._server.services.enricher.MediaEnrichService.enrich",
+            new_callable=AsyncMock,
+            side_effect=MediaEnrichmentError(record, Path("/tmp/bad.jpg")),
+        ):
+            result = await cs.upsert(record)
+        self.assertIs(result, record)
+        self.assertEqual(wq.qsize(), 0)
+
 
 class TestNodeSyncServiceDelete(IsolatedAsyncioTestCase):
     async def test_enqueues_delete(self):
@@ -217,6 +236,38 @@ class TestNodeSyncServiceUpsertBatch(IsolatedAsyncioTestCase):
         await op()
         self.assertEqual(len(storage._scan_batches), 1)
         self.assertEqual(len(storage._scan_batches[0][1]), 2)
+
+    async def test_enrichment_failure_filters_batch_record(self):
+        cs, storage, wq = _make_service()
+        failed = _make_record("a", is_image=True)
+        kept = _make_record("b")
+
+        async def enrich(record, **_kw):
+            if record is failed:
+                raise MediaEnrichmentError(record, Path("/tmp/bad.jpg"))
+            return record
+
+        with patch(
+            "wcpan.drive.synology._server.services.enricher.MediaEnrichService.enrich",
+            new_callable=AsyncMock,
+            side_effect=enrich,
+        ):
+            await cs.upsert_batch([failed, kept])
+        self.assertEqual(wq.qsize(), 1)
+        op = wq.get_nowait()
+        await op()
+        self.assertEqual(storage._scan_batches[0][1], [kept])
+
+    async def test_enrichment_failure_skips_entire_batch_when_all_fail(self):
+        cs, _, wq = _make_service()
+        record = _make_record("a", is_image=True)
+        with patch(
+            "wcpan.drive.synology._server.services.enricher.MediaEnrichService.enrich",
+            new_callable=AsyncMock,
+            side_effect=MediaEnrichmentError(record, Path("/tmp/bad.jpg")),
+        ):
+            await cs.upsert_batch([record])
+        self.assertEqual(wq.qsize(), 0)
 
 
 class TestNodeSyncServiceUpsertFileBatch(IsolatedAsyncioTestCase):
@@ -364,3 +415,15 @@ class TestNodeSyncServiceLifecycle(IsolatedAsyncioTestCase):
         op = wq.get_nowait()
         await op()
         self.assertIn("n1", storage._nodes)
+
+    async def test_process_metadata_item_skips_enrichment_failure(self):
+        cs, _, wq = _make_service()
+        record = _make_record(is_image=True)
+        item = MetadataWorkItem(record=record, force_refresh=True)
+        with patch(
+            "wcpan.drive.synology._server.services.enricher.MediaEnrichService.enrich",
+            new_callable=AsyncMock,
+            side_effect=MediaEnrichmentError(record, Path("/tmp/bad.jpg")),
+        ):
+            await cs.process_metadata_item(item)
+        self.assertEqual(wq.qsize(), 0)

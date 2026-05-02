@@ -1,10 +1,11 @@
 """Central service for persisting node changes from scan, webhook, and API sources."""
 
 from functools import partial
+from logging import getLogger
 
 from ...types import MirrorStableId, NodeRecord
 from ..types import MetadataQueue, MetadataWorkItem, SynologyPath, WriteQueue
-from .enricher import MediaEnrichService
+from .enricher import MediaEnrichmentError, MediaEnrichService
 from .off_main import OffMainService
 from .paths import LocalPathService
 from .storage import StorageService
@@ -19,6 +20,9 @@ def _has_complete_media_dims(record: NodeRecord) -> bool:
             return record.ms_duration > 0
         return True
     return False
+
+
+_L = getLogger(__name__)
 
 
 class NodeSyncService:
@@ -70,9 +74,9 @@ class NodeSyncService:
 
     async def process_metadata_item(self, item: MetadataWorkItem) -> None:
         """Run from ``metadata_worker``: enrich then enqueue a sync DB write."""
-        enriched = await self._enricher.enrich(
-            item.record, force_refresh=item.force_refresh
-        )
+        enriched = await self._try_enrich(item.record, force_refresh=item.force_refresh)
+        if enriched is None:
+            return
         await self._write_queue.put(
             partial(self._storage.upsert_node_and_emit_change, enriched)
         )
@@ -85,11 +89,13 @@ class NodeSyncService:
         Returns the (possibly enriched) record so callers can use it in responses.
         Used by: API (create, update, upload), webhook (delayed per-file upsert).
         """
-        record = await self._enricher.enrich(record, force_refresh=False)
+        enriched = await self._try_enrich(record, force_refresh=False)
+        if enriched is None:
+            return record
         await self._write_queue.put(
-            partial(self._storage.upsert_node_and_emit_change, record)
+            partial(self._storage.upsert_node_and_emit_change, enriched)
         )
-        return record
+        return enriched
 
     async def delete(self, node_id: MirrorStableId) -> None:
         """Enqueue delete_subtree_and_emit_changes.
@@ -119,12 +125,30 @@ class NodeSyncService:
         """
         if not records:
             return
-        enriched = [
-            await self._enricher.enrich(r, force_refresh=False) for r in records
-        ]
+        enriched: list[NodeRecord] = []
+        for r in records:
+            if (record := await self._try_enrich(r, force_refresh=False)) is not None:
+                enriched.append(record)
+        if not enriched:
+            return
         await self._write_queue.put(
             partial(self._storage.apply_scan_folder_batch, [], enriched)
         )
+
+    async def _try_enrich(
+        self, record: NodeRecord, *, force_refresh: bool
+    ) -> NodeRecord | None:
+        try:
+            return await self._enricher.enrich(record, force_refresh=force_refresh)
+        except MediaEnrichmentError as e:
+            _L.warning(
+                "Skipping node %s (%s) after media enrichment failed at %s",
+                record.id,
+                record.name,
+                e.path,
+                exc_info=True,
+            )
+            return None
 
     async def upsert_file_batch(self, records: list[NodeRecord]) -> None:
         """After directory rows are committed, enqueue per-file media enrichment.
