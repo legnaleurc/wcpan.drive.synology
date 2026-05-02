@@ -19,7 +19,7 @@ from wcpan.drive.synology._server.types import (
     SynologyFileId,
     SynologyPath,
 )
-from wcpan.drive.synology.types import MirrorMutableId
+from wcpan.drive.synology.types import MirrorMutableId, MirrorStableId
 
 
 class TestIsVirtual(TestCase):
@@ -33,7 +33,7 @@ class TestIsVirtual(TestCase):
 
     def test_mount_is_virtual(self):
         # given
-        node_id = "_photos"
+        node_id = MirrorStableId("_photos")
         # when
         result = is_virtual(node_id)
         # then
@@ -41,7 +41,7 @@ class TestIsVirtual(TestCase):
 
     def test_synology_id_not_virtual(self):
         # given
-        node_id = "12345"
+        node_id = MirrorStableId("12345")
         # when
         result = is_virtual(node_id)
         # then
@@ -51,7 +51,7 @@ class TestIsVirtual(TestCase):
 class TestIsMountNodeId(TestCase):
     def test_bare_root_not_mount(self):
         # given
-        node_id = "_"
+        node_id = MirrorStableId("_")
         # when
         result = is_mount_node_id(node_id)
         # then
@@ -59,7 +59,7 @@ class TestIsMountNodeId(TestCase):
 
     def test_named_mount_is_mount(self):
         # given
-        node_id = "_share-a"
+        node_id = MirrorStableId("_share-a")
         # when
         result = is_mount_node_id(node_id)
         # then
@@ -79,7 +79,7 @@ class TestMountId(TestCase):
 class TestMountName(TestCase):
     def test_returns_key_for_mount(self):
         # given
-        node_id = "_foo"
+        node_id = MirrorStableId("_foo")
         # when
         result = mount_name(node_id)
         # then
@@ -87,7 +87,7 @@ class TestMountName(TestCase):
 
     def test_root_returns_none(self):
         # given
-        node_id = "_"
+        node_id = MirrorStableId("_")
         # when
         result = mount_name(node_id)
         # then
@@ -95,7 +95,7 @@ class TestMountName(TestCase):
 
     def test_real_id_returns_none(self):
         # given
-        node_id = "999"
+        node_id = MirrorStableId("999")
         # when
         result = mount_name(node_id)
         # then
@@ -113,7 +113,7 @@ class TestSynologyParentRef(IsolatedAsyncioTestCase):
             storage=MagicMock(),
         )
         # when
-        result = await svc.synology_parent_ref("_photos")
+        result = await svc.synology_parent_ref(MirrorStableId("_photos"))
         # then
         self.assertEqual(result, "/volume1/photos")
 
@@ -127,7 +127,7 @@ class TestSynologyParentRef(IsolatedAsyncioTestCase):
         )
         # when / then
         with self.assertRaises(ValueError):
-            await svc.synology_parent_ref("_")
+            await svc.synology_parent_ref(MirrorStableId("_"))
 
     async def test_real_parent_requires_stored_node(self):
         # given
@@ -139,7 +139,7 @@ class TestSynologyParentRef(IsolatedAsyncioTestCase):
         )
         # when / then
         with self.assertRaises(ValueError):
-            await svc.synology_parent_ref("syno-file-7")
+            await svc.synology_parent_ref(MirrorStableId("syno-file-7"))
 
 
 class TestCreateMountRegistry(IsolatedAsyncioTestCase):
@@ -241,7 +241,9 @@ class TestFindChildByName(IsolatedAsyncioTestCase):
         expected = {"name": "2024"}
         drive_api.get_node_metadata = AsyncMock(return_value=expected)
         # when
-        result = await svc.find_child_by_name(drive_api, "_photos", "2024")
+        result = await svc.find_child_by_name(
+            drive_api, MirrorStableId("_photos"), "2024"
+        )
         # then
         drive_api.get_node_metadata.assert_awaited_once_with(
             SynologyChildRef(parent_ref=mount_path, name="2024")
@@ -262,7 +264,9 @@ class TestFindChildByName(IsolatedAsyncioTestCase):
         expected = {"name": "img.jpg"}
         drive_api.get_node_metadata = AsyncMock(return_value=expected)
         # when
-        result = await svc.find_child_by_name(drive_api, "42", "img.jpg")
+        result = await svc.find_child_by_name(
+            drive_api, MirrorStableId("42"), "img.jpg"
+        )
         # then
         drive_api.get_node_metadata.assert_awaited_once_with(
             SynologyChildRef(
@@ -284,4 +288,4 @@ class TestFindChildByName(IsolatedAsyncioTestCase):
         drive_api.get_node_metadata = AsyncMock(return_value=None)
         # when / then
         with self.assertRaises(ValueError):
-            await svc.find_child_by_name(drive_api, "99", "child.txt")
+            await svc.find_child_by_name(drive_api, MirrorStableId("99"), "child.txt")
