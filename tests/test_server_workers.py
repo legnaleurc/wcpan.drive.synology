@@ -244,3 +244,15 @@ class TestCheckpointScheduler(IsolatedAsyncioTestCase):
             await asyncio.sleep(0.03)
 
         self.assertEqual(storage.checkpoint.await_count, 2)
+
+    async def test_checkpoint_failure_propagates(self):
+        storage = MagicMock()
+        storage.checkpoint = AsyncMock(side_effect=RuntimeError("checkpoint failed"))
+
+        with self.assertRaises(ExceptionGroup) as cm:
+            async with asyncio.TaskGroup() as group:
+                schedule = create_checkpoint_scheduler(group, storage, delay=0)
+                schedule()
+                await asyncio.sleep(0)
+
+        self.assertIsInstance(cm.exception.exceptions[0], RuntimeError)

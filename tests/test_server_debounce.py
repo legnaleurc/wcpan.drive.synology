@@ -57,9 +57,9 @@ class TestDebouncer(IsolatedAsyncioTestCase):
             await started.wait()
             debouncer.start(second)
             finish.set()
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.03)
 
-        self.assertEqual(seen, ["first"])
+        self.assertEqual(seen, ["first", "second"])
 
     async def test_cancel_removes_pending_task(self) -> None:
         seen: list[str] = []
@@ -98,3 +98,26 @@ class TestTaskIdDebouncer(IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
 
         self.assertEqual(seen, ["first-b", "second-a"])
+
+    async def test_schedule_after_body_starts_schedules_later_work(self) -> None:
+        seen: list[str] = []
+        started = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def first() -> None:
+            seen.append("first")
+            started.set()
+            await finish.wait()
+
+        async def second() -> None:
+            seen.append("second")
+
+        async with asyncio.TaskGroup() as group:
+            debouncer = TaskIdDebouncer(group, 0.01)
+            debouncer.schedule("a", first)
+            await started.wait()
+            debouncer.schedule("a", second)
+            finish.set()
+            await asyncio.sleep(0.03)
+
+        self.assertEqual(seen, ["first", "second"])

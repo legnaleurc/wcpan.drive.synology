@@ -27,10 +27,6 @@ _L = getLogger(__name__)
 _PENDING_FILE_DELAY = 10.0
 
 
-def _log_pending_file_error(file_id: str, _error: Exception) -> None:
-    _L.exception("Pending file task failed for %s", file_id)
-
-
 @dataclass(frozen=True, slots=True)
 class _WebhookActionPlan:
     event_type: str
@@ -306,11 +302,7 @@ class WebhookService:
         group: asyncio.TaskGroup,
         scan_done_event: asyncio.Event,
     ) -> None:
-        pending = TaskIdDebouncer(
-            group,
-            _PENDING_FILE_DELAY,
-            on_error=_log_pending_file_error,
-        )
+        pending = TaskIdDebouncer(group, _PENDING_FILE_DELAY)
         await scan_done_event.wait()
         while True:
             item = await queue.get()

@@ -52,21 +52,13 @@ async def metadata_worker(
             metadata_queue.task_done()
 
 
-def _log_checkpoint_error(_task_id: str, _error: Exception) -> None:
-    _L.exception("WAL checkpoint failed")
-
-
 def create_checkpoint_scheduler(
     group: asyncio.TaskGroup,
     storage: StorageService,
     *,
     delay: float = _WAL_CHECKPOINT_DELAY,
 ) -> Callable[[], None]:
-    debouncer = Debouncer(
-        group,
-        delay,
-        on_error=_log_checkpoint_error,
-    )
+    debouncer = Debouncer(group, delay)
 
     def schedule_checkpoint() -> None:
         debouncer.start(storage.checkpoint)
