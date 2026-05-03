@@ -146,7 +146,6 @@ class NodeSyncService:
                 record.id,
                 record.name,
                 e.path,
-                exc_info=True,
             )
             return None
 
