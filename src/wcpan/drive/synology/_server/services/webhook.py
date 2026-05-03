@@ -10,7 +10,7 @@ from ..api.lib import convert_file_info
 from ..api.types import SynologyWebhookEvent
 from ..lib.bfs import parallel_bfs
 from ..lib.debounce import TaskIdDebouncer
-from ..lib.mounts import MountRegistry
+from ..lib.mounts import MountRegistry, mount_name
 from ..types import (
     SynologyFileId,
     SynologyPermanentLink,
@@ -203,6 +203,7 @@ class WebhookService:
         *,
         pending: TaskIdDebouncer,
     ) -> None:
+        skip_moved_dir_subtree_scan = await self._can_skip_moved_dir_subtree_scan(plan)
         if plan.fetch_immediately:
             await self._fetch_and_enrich(
                 plan.file_ref,
@@ -212,7 +213,7 @@ class WebhookService:
             )
         if plan.wait_for_writes:
             await self._write_queue.join()
-        if plan.scan_moved_dir_subtree:
+        if plan.scan_moved_dir_subtree and not skip_moved_dir_subtree_scan:
             subtree_root_id = await self._resolve_moved_dir_root_id(
                 plan.file_ref,
                 plan.permanent_link_ref,
@@ -237,6 +238,52 @@ class WebhookService:
                     plan.event_type,
                 ),
             )
+
+    async def _can_skip_moved_dir_subtree_scan(
+        self,
+        plan: _WebhookActionPlan,
+    ) -> bool:
+        if not plan.scan_moved_dir_subtree:
+            return False
+
+        source_node = await self._storage.get_node_by_id(
+            plan.permanent_link_ref.to_mirror_stable_id()
+        )
+        if source_node is None:
+            source_node = await self._storage.get_node_by_mutable_id(
+                plan.file_ref.to_mirror_mutable_id()
+            )
+        if source_node is None:
+            return False
+        if not await self._is_node_under_configured_mount(source_node):
+            return False
+
+        parent_ref = plan.parent_file_ref
+        if parent_ref is None:
+            return False
+        destination_parent = await self._storage.get_node_by_mutable_id(
+            parent_ref.to_mirror_mutable_id()
+        )
+        if destination_parent is not None:
+            return await self._is_node_under_configured_mount(destination_parent)
+        return self._mount_registry.lookup_mount_virtual_id(parent_ref) is not None
+
+    async def _is_node_under_configured_mount(self, node: NodeRecord) -> bool:
+        if node.parent_id is None:
+            return False
+
+        direct_mount = mount_name(node.parent_id)
+        if direct_mount is not None:
+            return direct_mount in self._mount_registry.mounts
+
+        ancestors = await self._storage.get_ancestors(node.id)
+        if not ancestors:
+            return False
+        top = ancestors[-1]
+        if top.parent_id is None:
+            return False
+        ancestor_mount = mount_name(top.parent_id)
+        return ancestor_mount in self._mount_registry.mounts
 
     async def _scan_moved_dir_subtree(self, folder_id: MirrorStableId) -> None:
         """BFS-populate children of a moved directory not delivered by the webhook."""

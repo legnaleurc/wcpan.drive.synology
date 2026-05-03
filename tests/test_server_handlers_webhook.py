@@ -397,6 +397,237 @@ class TestExecuteWebhookPlan(IsolatedAsyncioTestCase):
                 plan.event_type,
             )
 
+    async def test_mirrored_directory_move_fetches_waits_without_scanning(self):
+        storage = MagicMock()
+        storage.get_node_by_id = AsyncMock(return_value=_make_node("f1", "_video"))
+        storage.get_node_by_mutable_id = AsyncMock(
+            return_value=_make_node("p1", "_video")
+        )
+        registry = MountRegistry(mounts={"video": "/team-folders/video/L"}, root_ids={})
+        service = _make_service(storage=storage, mount_registry=registry)
+        service._write_queue.join = AsyncMock()
+        pending = MagicMock()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "file_moved",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "dir",
+                "parent_id": "p1",
+            },
+        )
+
+        with (
+            patch.object(
+                service,
+                "_fetch_and_enrich",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
+            patch.object(
+                service,
+                "_scan_moved_dir_subtree",
+                new_callable=AsyncMock,
+            ) as mock_scan,
+        ):
+            await service._execute_webhook_plan(plan, pending=pending)
+
+        mock_fetch.assert_awaited_once_with(
+            plan.file_ref,
+            plan.permanent_link_ref,
+            plan.parent_file_ref,
+            plan.event_type,
+        )
+        service._write_queue.join.assert_awaited_once()
+        mock_scan.assert_not_awaited()
+
+    async def test_mirrored_directory_move_to_mount_root_skips_scanning(self):
+        storage = MagicMock()
+        storage.get_node_by_id = AsyncMock(return_value=_make_node("f1", "_video"))
+        storage.get_node_by_mutable_id = AsyncMock(return_value=None)
+        registry = MountRegistry(
+            mounts={"video": "/team-folders/video/L"},
+            root_ids={
+                SynologyFileId(file_id="mount-root"): MirrorStableId("_video"),
+            },
+        )
+        service = _make_service(storage=storage, mount_registry=registry)
+        service._write_queue.join = AsyncMock()
+        pending = MagicMock()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "file_moved",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "dir",
+                "parent_id": "mount-root",
+            },
+        )
+
+        with (
+            patch.object(
+                service,
+                "_fetch_and_enrich",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
+            patch.object(
+                service,
+                "_scan_moved_dir_subtree",
+                new_callable=AsyncMock,
+            ) as mock_scan,
+        ):
+            await service._execute_webhook_plan(plan, pending=pending)
+
+        mock_fetch.assert_awaited_once()
+        service._write_queue.join.assert_awaited_once()
+        mock_scan.assert_not_awaited()
+
+    async def test_moved_directory_source_not_under_current_mount_scans(self):
+        storage = MagicMock()
+        storage.get_node_by_id = AsyncMock(return_value=_make_node("f1", "_old"))
+        storage.get_node_by_mutable_id = AsyncMock(
+            return_value=_make_node("p1", "_video")
+        )
+        registry = MountRegistry(mounts={"video": "/team-folders/video/L"}, root_ids={})
+        service = _make_service(storage=storage, mount_registry=registry)
+        service._write_queue.join = AsyncMock()
+        pending = MagicMock()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "file_moved",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "dir",
+                "parent_id": "p1",
+            },
+        )
+
+        with (
+            patch.object(service, "_fetch_and_enrich", new_callable=AsyncMock),
+            patch.object(
+                service,
+                "_resolve_moved_dir_root_id",
+                new_callable=AsyncMock,
+                return_value=MirrorStableId("f1"),
+            ),
+            patch.object(
+                service,
+                "_scan_moved_dir_subtree",
+                new_callable=AsyncMock,
+            ) as mock_scan,
+        ):
+            await service._execute_webhook_plan(plan, pending=pending)
+
+        mock_scan.assert_awaited_once_with(MirrorStableId("f1"))
+
+    async def test_moved_directory_destination_not_under_current_mount_scans(self):
+        storage = MagicMock()
+        storage.get_node_by_id = AsyncMock(return_value=_make_node("f1", "_video"))
+        storage.get_node_by_mutable_id = AsyncMock(
+            return_value=_make_node("p1", "_old")
+        )
+        registry = MountRegistry(mounts={"video": "/team-folders/video/L"}, root_ids={})
+        service = _make_service(storage=storage, mount_registry=registry)
+        service._write_queue.join = AsyncMock()
+        pending = MagicMock()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "file_moved",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "dir",
+                "parent_id": "p1",
+            },
+        )
+
+        with (
+            patch.object(service, "_fetch_and_enrich", new_callable=AsyncMock),
+            patch.object(
+                service,
+                "_resolve_moved_dir_root_id",
+                new_callable=AsyncMock,
+                return_value=MirrorStableId("f1"),
+            ),
+            patch.object(
+                service,
+                "_scan_moved_dir_subtree",
+                new_callable=AsyncMock,
+            ) as mock_scan,
+        ):
+            await service._execute_webhook_plan(plan, pending=pending)
+
+        mock_scan.assert_awaited_once_with(MirrorStableId("f1"))
+
+    async def test_moved_directory_missing_source_scans(self):
+        storage = MagicMock()
+        storage.get_node_by_id = AsyncMock(return_value=None)
+        storage.get_node_by_mutable_id = AsyncMock(return_value=None)
+        service = _make_service(storage=storage)
+        service._write_queue.join = AsyncMock()
+        pending = MagicMock()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "file_moved",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "dir",
+                "parent_id": "p1",
+            },
+        )
+
+        with (
+            patch.object(service, "_fetch_and_enrich", new_callable=AsyncMock),
+            patch.object(
+                service,
+                "_resolve_moved_dir_root_id",
+                new_callable=AsyncMock,
+                return_value=MirrorStableId("f1"),
+            ),
+            patch.object(
+                service,
+                "_scan_moved_dir_subtree",
+                new_callable=AsyncMock,
+            ) as mock_scan,
+        ):
+            await service._execute_webhook_plan(plan, pending=pending)
+
+        mock_scan.assert_awaited_once_with(MirrorStableId("f1"))
+
+    async def test_moved_directory_missing_destination_scans(self):
+        storage = MagicMock()
+        storage.get_node_by_id = AsyncMock(return_value=_make_node("f1", "_video"))
+        storage.get_node_by_mutable_id = AsyncMock(return_value=None)
+        registry = MountRegistry(mounts={"video": "/team-folders/video/L"}, root_ids={})
+        service = _make_service(storage=storage, mount_registry=registry)
+        service._write_queue.join = AsyncMock()
+        pending = MagicMock()
+        plan = service._classify_webhook_item(
+            {
+                "event_type": "file_moved",
+                "file_id": "f1",
+                "permanent_link": "f1",
+                "file_type": "dir",
+                "parent_id": "p1",
+            },
+        )
+
+        with (
+            patch.object(service, "_fetch_and_enrich", new_callable=AsyncMock),
+            patch.object(
+                service,
+                "_resolve_moved_dir_root_id",
+                new_callable=AsyncMock,
+                return_value=MirrorStableId("f1"),
+            ),
+            patch.object(
+                service,
+                "_scan_moved_dir_subtree",
+                new_callable=AsyncMock,
+            ) as mock_scan,
+        ):
+            await service._execute_webhook_plan(plan, pending=pending)
+
+        mock_scan.assert_awaited_once_with(MirrorStableId("f1"))
+
 
 # ---------------------------------------------------------------------------
 # _resolve_moved_dir_root_id
