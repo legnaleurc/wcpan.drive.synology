@@ -81,12 +81,23 @@ class WebhookService:
         if parent_node is None:
             resolved = self._mount_registry.lookup_mount_virtual_id(parent_file_ref)
             if resolved is None:
-                _L.warning(
-                    "parent_id %s for %s (%s) not in DB and not a known mount; skipping",
-                    parent_file_ref.file_id,
-                    file_ref.file_id,
-                    event_type,
-                )
+                if event_type in ("file_moved", "file_renamed"):
+                    existing = await self._storage.get_node_by_id(
+                        permanent_link_ref.to_mirror_stable_id()
+                    )
+                    if existing is not None:
+                        _L.debug(
+                            "file_id %s moved outside configured mounts; deleting from mirror",
+                            file_ref.file_id,
+                        )
+                        await self._node_sync.delete(existing.id)
+                else:
+                    _L.warning(
+                        "parent_id %s for %s (%s) not in DB and not a known mount; skipping",
+                        parent_file_ref.file_id,
+                        file_ref.file_id,
+                        event_type,
+                    )
                 return
             effective_parent_id = resolved
         else:

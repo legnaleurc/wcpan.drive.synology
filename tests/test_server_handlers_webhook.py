@@ -120,6 +120,38 @@ class TestFetchAndEnrich(IsolatedAsyncioTestCase):
             "file_created",
         )
 
+    async def test_file_moved_to_unknown_parent_deletes_existing_node(self):
+        storage = MagicMock()
+        storage.get_node_by_mutable_id = AsyncMock(return_value=None)
+        storage.get_node_by_id = AsyncMock(return_value=_make_node())
+        node_sync = MagicMock(spec=NodeSyncService)
+        node_sync.delete = AsyncMock()
+        service = _make_service(storage=storage, node_sync=node_sync)
+
+        await service._fetch_and_enrich(
+            SynologyFileId(file_id="f1"),
+            SynologyPermanentLink(permanent_link="f1"),
+            SynologyFileId(file_id="unknown-parent"),
+            "file_moved",
+        )
+        node_sync.delete.assert_awaited_once_with(MirrorStableId("f1"))
+
+    async def test_file_moved_to_unknown_parent_no_op_when_node_absent(self):
+        storage = MagicMock()
+        storage.get_node_by_mutable_id = AsyncMock(return_value=None)
+        storage.get_node_by_id = AsyncMock(return_value=None)
+        node_sync = MagicMock(spec=NodeSyncService)
+        node_sync.delete = AsyncMock()
+        service = _make_service(storage=storage, node_sync=node_sync)
+
+        await service._fetch_and_enrich(
+            SynologyFileId(file_id="f1"),
+            SynologyPermanentLink(permanent_link="f1"),
+            SynologyFileId(file_id="unknown-parent"),
+            "file_moved",
+        )
+        node_sync.delete.assert_not_awaited()
+
     async def test_parent_resolved_via_mount(self):
         storage = MagicMock()
         storage.get_node_by_mutable_id = AsyncMock(return_value=None)
