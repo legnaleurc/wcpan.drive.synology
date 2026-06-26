@@ -1,5 +1,6 @@
 """Tests for Synology WebStation file API helpers."""
 
+import unicodedata
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock
 
@@ -46,6 +47,27 @@ class TestUploadFile(IsolatedAsyncioTestCase):
             network=network,
         )
         self.assertEqual(info["file_id"], "uploaded")
+
+    async def test_upload_path_name_is_normalized_to_nfc(self):
+        raw_name = "かなは\u3099.txt"
+        normalized_name = unicodedata.normalize("NFC", raw_name)
+        network = MagicMock(spec=WebStationNetworkService)
+        network.upload = AsyncMock(return_value=_item("uploaded", normalized_name))
+
+        async def _chunks():
+            yield b"hello"
+
+        await upload_file(
+            SynologyFileId(file_id="parent"),
+            raw_name,
+            _chunks(),
+            network=network,
+        )
+        self.assertEqual(network.upload.await_args.kwargs["file_name"], normalized_name)
+        self.assertEqual(
+            network.upload.await_args.kwargs["form_fields"]["path"],
+            f"id:parent/{normalized_name}",
+        )
 
     async def test_conflict_raises(self):
         network = MagicMock(spec=WebStationNetworkService)

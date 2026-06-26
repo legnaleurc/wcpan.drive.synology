@@ -2,6 +2,7 @@
 
 import asyncio
 import tempfile
+import unicodedata
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -234,6 +235,28 @@ class TestCreateNode(IsolatedAsyncioTestCase):
         self.assertEqual(record.id, "new-dir")
         self.assertTrue(record.is_directory)
 
+    async def test_name_is_normalized_to_nfc(self):
+        raw_name = "てすとは\u3099"
+        normalized_name = unicodedata.normalize("NFC", raw_name)
+        storage = _FakeStorage()
+        app = _make_app(storage)
+        result = dict(_FAKE_SYNO_INFO, name=normalized_name)
+        with patch.object(
+            app[SYNOLOGY_DRIVE_API_KEY],
+            "create_folder",
+            new_callable=AsyncMock,
+            return_value=result,
+        ) as create_folder:
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post(
+                    "/api/v1/nodes",
+                    json={"name": raw_name, "parent_id": "p1"},
+                )
+                self.assertEqual(resp.status, 201)
+                record = node_record_from_dict(await resp.json())
+        self.assertEqual(create_folder.await_args.args[1], normalized_name)
+        self.assertEqual(record.name, normalized_name)
+
     async def test_missing_name(self):
         storage = _FakeStorage()
         app = _make_app(storage)
@@ -287,6 +310,36 @@ class TestUpdateNode(IsolatedAsyncioTestCase):
                 self.assertEqual(resp.status, 200)
                 record = node_record_from_dict(await resp.json())
         self.assertEqual(record.name, "renamed.txt")
+
+    async def test_rename_name_is_normalized_to_nfc(self):
+        raw_name = "かなひ\u309a.txt"
+        normalized_name = unicodedata.normalize("NFC", raw_name)
+        storage = _FakeStorage()
+        storage._nodes["n1"] = _make_node()
+        app = _make_app(storage)
+        rename_result = {
+            "name": normalized_name,
+            "created_time": 1000,
+            "modified_time": 2000,
+            "change_time": 0,
+            "hash": "abc",
+            "size": 100,
+        }
+        with patch.object(
+            app[SYNOLOGY_DRIVE_API_KEY],
+            "rename_node",
+            new_callable=AsyncMock,
+            return_value=rename_result,
+        ) as rename_node:
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.patch(
+                    "/api/v1/nodes/n1",
+                    json={"name": raw_name},
+                )
+                self.assertEqual(resp.status, 200)
+                record = node_record_from_dict(await resp.json())
+        self.assertEqual(rename_node.await_args.args[1], normalized_name)
+        self.assertEqual(record.name, normalized_name)
 
     async def test_move(self):
         storage = _FakeStorage()
@@ -477,6 +530,40 @@ class TestUploadNode(IsolatedAsyncioTestCase):
                 record = node_record_from_dict(await resp.json())
         self.assertEqual(record.id, "uploaded-1")
         self.assertEqual(record.name, "data.bin")
+
+    async def test_upload_name_is_normalized_to_nfc(self):
+        raw_name = "かなは\u3099.txt"
+        normalized_name = unicodedata.normalize("NFC", raw_name)
+        storage = _FakeStorage()
+        app = _make_app(storage)
+        upload_info = {
+            "file_id": "uploaded-1",
+            "permanent_link": "uploaded-1",
+            "name": normalized_name,
+            "type": "file",
+            "content_type": "file",
+            "size": 5,
+            "created_time": 1000,
+            "modified_time": 1000,
+            "change_time": 0,
+            "sync_id": 1,
+        }
+        with patch.object(
+            app[SYNOLOGY_DRIVE_API_KEY],
+            "upload_file",
+            new_callable=AsyncMock,
+            return_value=upload_info,
+        ) as upload_file:
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post(
+                    "/api/v1/nodes/p1/upload",
+                    data=b"hello",
+                    params={"name": raw_name},
+                )
+                self.assertEqual(resp.status, 201)
+                record = node_record_from_dict(await resp.json())
+        self.assertEqual(upload_file.await_args.kwargs["name"], normalized_name)
+        self.assertEqual(record.name, normalized_name)
 
     async def test_missing_name(self):
         storage = _FakeStorage()

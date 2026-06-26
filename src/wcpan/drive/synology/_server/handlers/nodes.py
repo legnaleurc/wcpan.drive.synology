@@ -20,6 +20,7 @@ from ..keys import (
     SYNOLOGY_PATH_KEY,
     UPLOAD_SERVICE_KEY,
 )
+from ..lib.names import normalize_name
 from ..services.paths import SERVER_ROOT_ID, SynologyPathService, is_virtual
 from ..services.upload import (
     UploadConflictError,
@@ -121,6 +122,7 @@ async def create_node(request: web.Request) -> web.Response:
 
     if not name or not parent_id_raw:
         raise web.HTTPBadRequest()
+    name = normalize_name(name)
     parent_id = MirrorStableId(parent_id_raw)
 
     parent_ref = await syno_paths.synology_parent_ref(parent_id)
@@ -184,6 +186,8 @@ async def update_node(request: web.Request) -> web.Response:
 
     body = await request.json()
     new_name: str | None = body.get("name")
+    if new_name:
+        new_name = normalize_name(new_name)
     new_parent_id = (
         MirrorStableId(body["parent_id"]) if body.get("parent_id") is not None else None
     )
@@ -295,6 +299,7 @@ async def upload_node(request: web.Request) -> web.Response:
     name = request.rel_url.query.get("name", "")
     if not name:
         raise web.HTTPBadRequest(reason="Missing 'name' query parameter")
+    name = normalize_name(name)
 
     mime_type = request.rel_url.query.get("mime_type") or None
     media_info = media_info_from_query(request.rel_url.query)

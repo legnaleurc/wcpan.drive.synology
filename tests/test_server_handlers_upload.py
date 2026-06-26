@@ -3,6 +3,7 @@
 import asyncio
 import json
 import tempfile
+import unicodedata
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -144,6 +145,24 @@ class TestCreateUploadSession(IsolatedAsyncioTestCase):
         self.assertEqual(resp.status, 201)
         self.assertIn("/api/v1/uploads/", resp.headers["Location"])
         self.assertEqual(resp.headers["Upload-Length"], "1024")
+
+    async def test_name_is_normalized_to_nfc(self):
+        raw_name = "かなは\u3099.txt"
+        normalized_name = unicodedata.normalize("NFC", raw_name)
+        app = _make_app(self._store)
+        req = _make_request(
+            app=app,
+            match_info={"parent_id": "p1"},
+            json_body={"name": raw_name, "size": 1024},
+        )
+        resp = await create_upload_session(req)
+        session_id = resp.headers["Location"].split("/")[-1]
+        session = self._store.get(session_id)
+        self.assertIsNotNone(session)
+        assert session is not None
+        self.assertEqual(session.name, normalized_name)
+        called_ref = app[SYNOLOGY_DRIVE_API_KEY].get_node_metadata.await_args.args[0]
+        self.assertTrue(str(called_ref).endswith(f"/{normalized_name}"))
 
     async def test_missing_name_raises_400(self):
         req = _make_request(

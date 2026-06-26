@@ -15,6 +15,7 @@ from ...types import MirrorStableId, NodeRecord
 from ..api.drive import SynologyDriveApi
 from ..api.types import SynologyFileInfo
 from ..lib.mounts import SERVER_ROOT_ID, MountRegistry, is_virtual, mount_name
+from ..lib.names import normalize_name
 from ..types import (
     SynologyChildRef,
     SynologyFileId,
@@ -77,7 +78,10 @@ class SynologyPathService:
         name: str,
     ) -> SynologyFileInfo | None:
         parent_ref = await self.synology_parent_ref(parent_node_id)
-        child_ref = SynologyChildRef(parent_ref=parent_ref, name=name)
+        child_ref = SynologyChildRef(
+            parent_ref=parent_ref,
+            name=normalize_name(name),
+        )
         return await drive_api.get_node_metadata(child_ref)
 
     async def _resolve_mutable_id_ref(

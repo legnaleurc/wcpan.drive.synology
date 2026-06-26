@@ -12,6 +12,7 @@ from ....exceptions import (
     SynologyUploadConflictError,
     SynologyUploadError,
 )
+from ...lib.names import normalize_name
 from ...types import (
     SynologyFolderRef,
     SynologyLookupRef,
@@ -131,6 +132,7 @@ async def create_folder(
     *,
     network: WebStationNetworkService,
 ) -> SynologyFileInfo:
+    name = normalize_name(name)
     try:
         data: SynologyFileInfo = await network.request(
             _FILES_API,
@@ -156,6 +158,7 @@ async def rename_node(
     *,
     network: WebStationNetworkService,
 ) -> SynologyFileInfo:
+    new_name = normalize_name(new_name)
     try:
         data: SynologyFileInfo = await network.request(
             _FILES_API,
@@ -213,6 +216,7 @@ async def upload_file(
     network: WebStationNetworkService,
     mime_type: str | None = None,
 ) -> SynologyFileInfo:
+    name = normalize_name(name)
     form_fields: dict[str, object] = {
         "path": f"{parent_ref}/{name}",
         "type": "file",

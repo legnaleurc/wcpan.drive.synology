@@ -21,6 +21,7 @@ from ...types import MirrorStableId, NodeRecord
 from ..api.drive import SynologyDriveApi
 from ..api.lib import convert_file_info
 from ..api.types import SynologyFileInfo
+from ..lib.names import normalize_name
 from ..services.paths import SynologyPathService
 from ..services.sync import NodeSyncService
 
@@ -153,6 +154,7 @@ class UploadService:
         mime_type: str | None,
         media_info: MediaInfo | None,
     ) -> UploadCreated:
+        name = normalize_name(name)
         existing = await self._syno_paths.find_child_by_name(
             self._drive_api, parent_id, name
         )
@@ -189,6 +191,7 @@ class UploadService:
         mime_type: str | None,
         media_info: MediaInfo | None,
     ) -> UploadCreatedNode:
+        name = normalize_name(name)
         existing = await self._syno_paths.find_child_by_name(
             self._drive_api, parent_id, name
         )
@@ -343,6 +346,7 @@ class UploadService:
         parent_id: MirrorStableId,
         name: str,
     ) -> NodeRecord:
+        name = normalize_name(name)
         info = await self._syno_paths.find_child_by_name(
             self._drive_api,
             parent_id,
