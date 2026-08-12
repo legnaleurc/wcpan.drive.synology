@@ -14,7 +14,10 @@ from wcpan.drive.synology._client.writable import (
     _ResumableWritableFile,
     create_writable,
 )
-from wcpan.drive.synology.exceptions import SynologyUploadError
+from wcpan.drive.synology.exceptions import (
+    SynologyNameTooLongError,
+    SynologyUploadError,
+)
 
 
 def _response_cm(status: int, body: dict) -> MagicMock:
@@ -172,6 +175,28 @@ class TestResumableWritableFileFlush(IsolatedAsyncioTestCase):
 
 
 class TestResumableWritableFileRetry(IsolatedAsyncioTestCase):
+    async def test_422_name_too_long_is_typed_and_not_retried(self):
+        client = _make_session("sid-long", total_size=50)
+        client.patch = MagicMock(
+            return_value=_response_cm(
+                422,
+                {
+                    "error": "name_too_long",
+                    "message": "File name is too long",
+                    "name": "long.bin",
+                },
+            )
+        )
+
+        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
+            writable = _make_writable(client, "sid-long", 50, buf)
+            await writable.write(b"x" * 50)
+            with self.assertRaises(SynologyNameTooLongError) as ctx:
+                await writable.flush()
+
+        self.assertEqual(ctx.exception.file_name, "long.bin")
+        client.patch.assert_called_once()
+
     async def test_503_honors_retry_after_and_resumes(self):
         total = 100
         client = _make_session("sid-503-resume", total_size=total)

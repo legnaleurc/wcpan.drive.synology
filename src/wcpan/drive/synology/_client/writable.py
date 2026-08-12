@@ -12,7 +12,11 @@ from wcpan.drive.core.exceptions import NodeExistsError
 from wcpan.drive.core.types import MediaInfo, Node, WritableFile
 
 from .._lib import NodeRecordDict, node_from_record, node_record_from_dict
-from ..exceptions import SynologyPermanentUploadError, SynologyUploadError
+from ..exceptions import (
+    SynologyNameTooLongError,
+    SynologyPermanentUploadError,
+    SynologyUploadError,
+)
 from .http409 import node_from_409
 
 
@@ -181,6 +185,13 @@ async def _upload_stream(
                 f"Upload failed for {name!r}: Synology returned transient error",
                 file_name=name,
             )
+        if response.status == 422:
+            error = cast(dict[str, object], await response.json())
+            if error.get("error") == "name_too_long":
+                raise SynologyNameTooLongError(
+                    str(error.get("message") or f"File name is too long: {name!r}"),
+                    file_name=str(error.get("name") or name),
+                )
         response.raise_for_status()
         result = await response.json()
     return node_from_record(node_record_from_dict(cast(NodeRecordDict, result)))
@@ -411,6 +422,19 @@ class _ResumableWritableFile(WritableFile):
                 except ValueError:
                     retry_delay = None
                 raise _RetryableUpload(retry_delay)
+            if response.status == 422:
+                try:
+                    error = cast(dict[str, object], await response.json())
+                except Exception:
+                    error = {}
+                if error.get("error") == "name_too_long":
+                    raise SynologyNameTooLongError(
+                        str(
+                            error.get("message")
+                            or f"File name is too long: {self._name!r}"
+                        ),
+                        file_name=str(error.get("name") or self._name),
+                    )
             if response.status == 507 or 400 <= response.status < 500:
                 raise SynologyPermanentUploadError(
                     f"Upload cannot be resumed for {self._name!r}: HTTP {response.status}",

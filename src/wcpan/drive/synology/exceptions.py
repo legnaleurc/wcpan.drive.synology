@@ -7,6 +7,7 @@ __all__ = (
     "SynologyApiError",
     "SynologyUploadError",
     "SynologyPermanentUploadError",
+    "SynologyNameTooLongError",
     "SynologyUploadConflictError",
     "SynologyNetworkError",
     "SynologyServerError",
@@ -51,6 +52,12 @@ class SynologyPermanentUploadError(SynologyUploadError):
     """Raised when retrying an upload cannot succeed without intervention."""
 
     retryable = False
+
+
+class SynologyNameTooLongError(SynologyPermanentUploadError):
+    """Raised when Synology rejects an upload because its name is too long."""
+
+    reason = "name_too_long"
 
 
 class SynologyUploadConflictError(SynologyUploadError):

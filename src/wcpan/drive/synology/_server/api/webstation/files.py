@@ -8,6 +8,7 @@ from aiohttp import ClientResponse
 
 from ....exceptions import (
     SynologyApiError,
+    SynologyNameTooLongError,
     SynologyNetworkError,
     SynologyUploadConflictError,
     SynologyUploadError,
@@ -148,6 +149,11 @@ async def create_folder(
                 f"Folder {name!r} already exists under {parent_ref!r}",
                 file_name=name,
             ) from e
+        if e.error_code == 1035:
+            raise SynologyNameTooLongError(
+                f"File name is too long for Synology Drive: {name!r}",
+                file_name=name,
+            ) from e
         raise
     return data
 
@@ -236,6 +242,11 @@ async def upload_file(
         if e.error_code == 1022:
             raise SynologyUploadConflictError(
                 f"Upload conflict for {name!r}: file already exists at destination",
+                file_name=name,
+            ) from e
+        if e.error_code == 1035:
+            raise SynologyNameTooLongError(
+                f"File name is too long for Synology Drive: {name!r}",
                 file_name=name,
             ) from e
         raise SynologyUploadError(

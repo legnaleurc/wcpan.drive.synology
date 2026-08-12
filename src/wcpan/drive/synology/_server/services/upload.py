@@ -17,6 +17,7 @@ from typing import BinaryIO
 from wcpan.drive.core.types import MediaInfo
 
 from ...exceptions import (
+    SynologyNameTooLongError,
     SynologyNetworkError,
     SynologyUploadConflictError,
     SynologyUploadError,
@@ -146,6 +147,12 @@ class UploadPermanentError(Exception):
     pass
 
 
+class UploadNameTooLongError(UploadPermanentError):
+    def __init__(self, name: str) -> None:
+        super().__init__(f"File name is too long for Synology Drive: {name!r}")
+        self.name = name
+
+
 class UploadConflictError(Exception):
     def __init__(self, record: NodeRecord) -> None:
         super().__init__()
@@ -271,6 +278,8 @@ class UploadService:
             raise UploadConflictError(record)
         except SynologyNetworkError as e:
             raise UploadTransientError(str(e)) from e
+        except SynologyNameTooLongError as e:
+            raise UploadNameTooLongError(e.file_name or name) from e
         except SynologyUploadError as e:
             raise UploadPermanentError(str(e)) from e
         return UploadCreatedNode(
@@ -396,6 +405,8 @@ class UploadService:
                 e,
             )
             raise UploadTransientError(str(e)) from e
+        except SynologyNameTooLongError as e:
+            raise UploadNameTooLongError(e.file_name or session.name) from e
         except SynologyUploadError as e:
             _L.warning(
                 "upload session permanently failed during finalisation session_id=%r name=%r parent_id=%r error=%s",

@@ -34,7 +34,11 @@ from wcpan.drive.synology._server.services.upload import (
     UploadService,
     UploadSessionStore,
 )
-from wcpan.drive.synology.exceptions import SynologyNetworkError, SynologyUploadError
+from wcpan.drive.synology.exceptions import (
+    SynologyNameTooLongError,
+    SynologyNetworkError,
+    SynologyUploadError,
+)
 from wcpan.drive.synology.types import MirrorMutableId
 
 
@@ -590,6 +594,26 @@ class TestPatchUploadChunk(IsolatedAsyncioTestCase):
             warning_log.call_args.args[0],
             "upload session permanently failed during finalisation session_id=%r name=%r parent_id=%r error=%s",
         )
+
+    async def test_name_too_long_returns_typed_422(self):
+        session = self._make_session(total=50)
+        app = _make_app(self._store)
+        app[SYNOLOGY_DRIVE_API_KEY].upload_file = AsyncMock(
+            side_effect=SynologyNameTooLongError(
+                "File name is too long", file_name="f.bin"
+            )
+        )
+        req = _make_request(
+            app=app,
+            match_info={"session_id": session.session_id},
+            headers={"Upload-Offset": "0"},
+            body=b"y" * 50,
+        )
+
+        resp = await patch_upload_chunk(req)
+
+        self.assertEqual(resp.status, 422)
+        self.assertEqual(json.loads(resp.body)["error"], "name_too_long")
 
     async def test_finalise_network_failure_logs_warning_and_keeps_session(self):
         session = self._make_session(total=50)

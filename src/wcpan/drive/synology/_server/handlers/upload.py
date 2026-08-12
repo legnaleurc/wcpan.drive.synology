@@ -11,6 +11,7 @@ from ..services.upload import (
     UploadConflictError,
     UploadCreatedNode,
     UploadInvalidChunkError,
+    UploadNameTooLongError,
     UploadOffsetMismatchError,
     UploadPermanentError,
     UploadService,
@@ -119,6 +120,11 @@ async def patch_upload_chunk(request: web.Request) -> web.Response:
         return web.json_response(record_to_response(e.record), status=409)
     except UploadTransientError as e:
         raise web.HTTPServiceUnavailable(reason=str(e), headers={"Retry-After": "5"})
+    except UploadNameTooLongError as e:
+        return web.json_response(
+            {"error": "name_too_long", "message": str(e), "name": e.name},
+            status=422,
+        )
     except UploadPermanentError as e:
         raise web.HTTPInsufficientStorage(reason=str(e))
 

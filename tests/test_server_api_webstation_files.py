@@ -11,6 +11,7 @@ from wcpan.drive.synology._server.api.webstation.network import (
 from wcpan.drive.synology._server.types import SynologyFileId
 from wcpan.drive.synology.exceptions import (
     SynologyApiError,
+    SynologyNameTooLongError,
     SynologyNetworkError,
     SynologyUploadConflictError,
     SynologyUploadError,
@@ -100,6 +101,25 @@ class TestUploadFile(IsolatedAsyncioTestCase):
                 _chunks(),
                 network=network,
             )
+
+    async def test_1035_raises_name_too_long_error(self):
+        network = MagicMock(spec=WebStationNetworkService)
+        network.upload = AsyncMock(
+            side_effect=SynologyApiError("name too long", error_code=1035)
+        )
+
+        async def _chunks():
+            yield b"x"
+
+        with self.assertRaises(SynologyNameTooLongError) as ctx:
+            await upload_file(
+                SynologyFileId(file_id="p"),
+                "very-long-name.bin",
+                _chunks(),
+                network=network,
+            )
+
+        self.assertEqual(ctx.exception.file_name, "very-long-name.bin")
 
     async def test_network_error_remains_network_error(self):
         network = MagicMock(spec=WebStationNetworkService)

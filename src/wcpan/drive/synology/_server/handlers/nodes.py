@@ -24,6 +24,7 @@ from ..lib.names import normalize_name
 from ..services.paths import SERVER_ROOT_ID, SynologyPathService, is_virtual
 from ..services.upload import (
     UploadConflictError,
+    UploadNameTooLongError,
     UploadPermanentError,
     UploadService,
     UploadTransientError,
@@ -324,6 +325,11 @@ async def upload_node(request: web.Request) -> web.Response:
         return web.json_response(record_to_response(e.record), status=409)
     except UploadTransientError as e:
         raise web.HTTPServiceUnavailable(reason=str(e), headers={"Retry-After": "5"})
+    except UploadNameTooLongError as e:
+        return web.json_response(
+            {"error": "name_too_long", "message": str(e), "name": e.name},
+            status=422,
+        )
     except UploadPermanentError as e:
         raise web.HTTPInsufficientStorage(reason=str(e))
 
