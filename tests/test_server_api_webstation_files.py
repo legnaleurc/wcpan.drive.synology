@@ -101,14 +101,14 @@ class TestUploadFile(IsolatedAsyncioTestCase):
                 network=network,
             )
 
-    async def test_network_error_raises_upload_error(self):
+    async def test_network_error_remains_network_error(self):
         network = MagicMock(spec=WebStationNetworkService)
         network.upload = AsyncMock(side_effect=SynologyNetworkError("connection reset"))
 
         async def _chunks():
             yield b"x"
 
-        with self.assertRaises(SynologyUploadError):
+        with self.assertRaises(SynologyNetworkError):
             await upload_file(
                 SynologyFileId(file_id="p"),
                 "bad.bin",

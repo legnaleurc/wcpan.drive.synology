@@ -12,6 +12,7 @@ from ..services.upload import (
     UploadCreatedNode,
     UploadInvalidChunkError,
     UploadOffsetMismatchError,
+    UploadPermanentError,
     UploadService,
     UploadSessionNotFoundError,
     UploadTransientError,
@@ -117,7 +118,9 @@ async def patch_upload_chunk(request: web.Request) -> web.Response:
     except UploadConflictError as e:
         return web.json_response(record_to_response(e.record), status=409)
     except UploadTransientError as e:
-        raise web.HTTPServiceUnavailable(reason=str(e))
+        raise web.HTTPServiceUnavailable(reason=str(e), headers={"Retry-After": "5"})
+    except UploadPermanentError as e:
+        raise web.HTTPInsufficientStorage(reason=str(e))
 
     match result:
         case UploadAccepted(offset=offset):

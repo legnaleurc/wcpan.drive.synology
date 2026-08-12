@@ -6,6 +6,7 @@ __all__ = (
     "SynologySessionExpiredError",
     "SynologyApiError",
     "SynologyUploadError",
+    "SynologyPermanentUploadError",
     "SynologyUploadConflictError",
     "SynologyNetworkError",
     "SynologyServerError",
@@ -44,6 +45,12 @@ class SynologyUploadError(DriveError):
     def __init__(self, message: str, file_name: str | None = None) -> None:
         super().__init__(message)
         self.file_name = file_name
+
+
+class SynologyPermanentUploadError(SynologyUploadError):
+    """Raised when retrying an upload cannot succeed without intervention."""
+
+    retryable = False
 
 
 class SynologyUploadConflictError(SynologyUploadError):

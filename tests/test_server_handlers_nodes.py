@@ -455,7 +455,7 @@ class TestUpdateNode(IsolatedAsyncioTestCase):
                     "/api/v1/nodes/n1",
                     json={"parent_id": "bad"},
                 )
-                self.assertEqual(resp.status, 503)
+        self.assertEqual(resp.status, 503)
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +601,7 @@ class TestUploadNode(IsolatedAsyncioTestCase):
                     data=b"hello",
                     params={"name": "x.bin"},
                 )
-                self.assertEqual(resp.status, 503)
+                self.assertEqual(resp.status, 507)
 
     async def test_conflict_returns_409_without_hitting_synology_upload(self):
         storage = _FakeStorage()

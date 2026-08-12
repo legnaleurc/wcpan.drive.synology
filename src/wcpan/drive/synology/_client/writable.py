@@ -12,14 +12,15 @@ from wcpan.drive.core.exceptions import NodeExistsError
 from wcpan.drive.core.types import MediaInfo, Node, WritableFile
 
 from .._lib import NodeRecordDict, node_from_record, node_record_from_dict
-from ..exceptions import SynologyUploadError
+from ..exceptions import SynologyPermanentUploadError, SynologyUploadError
 from .http409 import node_from_409
 
 
 _L = getLogger(__name__)
 
 _MAX_SPOOL = 64 * 1024 * 1024  # 64 MiB before spilling to disk
-_MAX_RETRIES = 5
+_MAX_RETRIES = 6
+_UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 _FINAL_TIMEOUT = ClientTimeout(
     total=None
 )  # no timeout — server uploads to Synology before responding
@@ -242,6 +243,12 @@ class _OffsetMismatch(Exception):
         self.server_received = server_received
 
 
+class _RetryableUpload(Exception):
+    def __init__(self, delay: float | None = None) -> None:
+        super().__init__("server requested a retry")
+        self.delay = delay
+
+
 class _ResumableWritableFile(WritableFile):
     def __init__(
         self,
@@ -279,11 +286,12 @@ class _ResumableWritableFile(WritableFile):
             return
 
         received = await self._query_received()
-        network_errors = 0
-        delay = 1.0
+        attempts = 0
+        delay = 2.0
 
         while True:
             try:
+                attempts += 1
                 node = await self._upload_from(received)
                 self._node = node
                 self._done = True
@@ -292,30 +300,52 @@ class _ResumableWritableFile(WritableFile):
                 received = e.server_received
                 # Offset correction — not a network error, no backoff needed.
                 continue
+            except _RetryableUpload as e:
+                retry_delay = e.delay if e.delay is not None else min(delay, 30.0)
+                if attempts >= _MAX_RETRIES:
+                    raise SynologyUploadError(
+                        f"Resumable upload failed after {attempts} attempts"
+                        f" for {self._name!r}",
+                        file_name=self._name,
+                    ) from e
+                received = await self._query_received()
+                _L.warning(
+                    "Retrying resumable upload for %r from offset %d "
+                    "after %.1f seconds (attempt %d/%d)",
+                    self._name,
+                    received,
+                    retry_delay,
+                    attempts,
+                    _MAX_RETRIES,
+                )
+                await asyncio.sleep(retry_delay)
+                delay = min(delay * 2, 30.0)
             except SynologyUploadError:
-                # Non-retryable (e.g. 503 from Synology, session not found).
                 raise
             except Exception as e:
-                network_errors += 1
-                _L.warning(
-                    "Resumable upload connection error (attempt %d/%d) for %r: %s",
-                    network_errors,
-                    _MAX_RETRIES,
-                    self._name,
-                    e,
-                )
-                if network_errors >= _MAX_RETRIES:
+                if attempts >= _MAX_RETRIES:
                     raise SynologyUploadError(
-                        f"Resumable upload failed after {_MAX_RETRIES} attempts"
+                        f"Resumable upload failed after {attempts} attempts"
                         f" for {self._name!r}",
                         file_name=self._name,
                     ) from e
                 try:
                     received = await self._query_received()
+                except SynologyPermanentUploadError:
+                    raise
                 except Exception:
-                    pass  # keep last known received
+                    pass
+                _L.warning(
+                    "Resumable upload connection error for %r from offset %d "
+                    "(attempt %d/%d): %s",
+                    self._name,
+                    received,
+                    attempts,
+                    _MAX_RETRIES,
+                    e,
+                )
                 await asyncio.sleep(min(delay, 30.0))
-                delay *= 2
+                delay = min(delay * 2, 30.0)
 
     @override
     async def node(self) -> Node:
@@ -332,44 +362,69 @@ class _ResumableWritableFile(WritableFile):
             timeout=ClientTimeout(total=30),
         ) as response:
             if response.status == 404:
-                return 0
+                raise SynologyPermanentUploadError(
+                    f"Upload session not found for {self._name!r}",
+                    file_name=self._name,
+                )
             response.raise_for_status()
             offset_str = response.headers.get("Upload-Offset", "0")
         return int(offset_str)
 
     async def _upload_from(self, start_offset: int) -> Node:
         """Stream the entire buffer from *start_offset* in a single PATCH request."""
-        self._buf.seek(start_offset)
         headers = {
             "Upload-Offset": str(start_offset),
+            "Content-Length": str(self._total_size - start_offset),
             "Content-Type": "application/octet-stream",
         }
         async with self._session.patch(
             self._session_url,
-            data=self._buf,
+            data=self._iter_buffer(start_offset),
             headers=headers,
             timeout=_FINAL_TIMEOUT,
         ) as response:
             if response.status == 409:
-                raise _OffsetMismatch(int(response.headers.get("Upload-Offset", "0")))
+                offset = response.headers.get("Upload-Offset")
+                if offset is None:
+                    node = await node_from_409(response)
+                    if node is not None:
+                        raise NodeExistsError(node)
+                    raise SynologyPermanentUploadError(
+                        f"Upload conflict for {self._name!r}",
+                        file_name=self._name,
+                    )
+                raise _OffsetMismatch(int(offset))
             if response.status == 204:
                 raise _OffsetMismatch(
                     int(response.headers.get("Upload-Offset", str(start_offset)))
                 )
             if response.status == 404:
-                raise SynologyUploadError(
+                raise SynologyPermanentUploadError(
                     f"Upload session not found for {self._name!r};"
                     " server may have restarted",
                     file_name=self._name,
                 )
             if response.status == 503:
-                raise SynologyUploadError(
-                    f"Synology upload failed for {self._name!r}",
+                retry_after = response.headers.get("Retry-After")
+                try:
+                    retry_delay = float(retry_after) if retry_after else None
+                except ValueError:
+                    retry_delay = None
+                raise _RetryableUpload(retry_delay)
+            if response.status == 507 or 400 <= response.status < 500:
+                raise SynologyPermanentUploadError(
+                    f"Upload cannot be resumed for {self._name!r}: HTTP {response.status}",
                     file_name=self._name,
                 )
             response.raise_for_status()
             data = await response.json()
         return node_from_record(node_record_from_dict(cast(NodeRecordDict, data)))
+
+    async def _iter_buffer(self, start_offset: int) -> AsyncIterator[bytes]:
+        """Yield spool contents without transferring file ownership to aiohttp."""
+        self._buf.seek(start_offset)
+        while chunk := self._buf.read(_UPLOAD_CHUNK_SIZE):
+            yield chunk
 
 
 class _EmptyWritableFile(WritableFile):

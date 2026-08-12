@@ -243,9 +243,9 @@ async def upload_file(
             file_name=name,
         ) from e
     except SynologyNetworkError as e:
-        raise SynologyUploadError(
+        raise SynologyNetworkError(
             f"Upload failed for {name!r}: {e}",
-            file_name=name,
+            original_error=e,
         ) from e
     return result
 

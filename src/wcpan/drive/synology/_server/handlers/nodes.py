@@ -24,6 +24,7 @@ from ..lib.names import normalize_name
 from ..services.paths import SERVER_ROOT_ID, SynologyPathService, is_virtual
 from ..services.upload import (
     UploadConflictError,
+    UploadPermanentError,
     UploadService,
     UploadTransientError,
 )
@@ -322,6 +323,8 @@ async def upload_node(request: web.Request) -> web.Response:
     except UploadConflictError as e:
         return web.json_response(record_to_response(e.record), status=409)
     except UploadTransientError as e:
-        raise web.HTTPServiceUnavailable(reason=str(e))
+        raise web.HTTPServiceUnavailable(reason=str(e), headers={"Retry-After": "5"})
+    except UploadPermanentError as e:
+        raise web.HTTPInsufficientStorage(reason=str(e))
 
     return web.json_response(record_to_response(result.record), status=201)

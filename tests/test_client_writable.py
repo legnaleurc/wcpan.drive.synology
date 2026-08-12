@@ -43,7 +43,11 @@ def _head_cm(status: int, *, upload_offset: str = "0") -> MagicMock:
 
 
 def _patch_cm(
-    status: int, *, upload_offset: str = "0", body: dict | None = None
+    status: int,
+    *,
+    upload_offset: str = "0",
+    retry_after: str | None = None,
+    body: dict | None = None,
 ) -> MagicMock:
     """Build a mock PATCH response."""
     response = MagicMock()
@@ -51,6 +55,8 @@ def _patch_cm(
     response.json = AsyncMock(return_value=body or {})
     response.raise_for_status = MagicMock()
     response.headers = {"Upload-Offset": upload_offset}
+    if retry_after is not None:
+        response.headers["Retry-After"] = retry_after
     cm = MagicMock()
     cm.__aenter__ = AsyncMock(return_value=response)
     cm.__aexit__ = AsyncMock(return_value=False)
@@ -166,6 +172,32 @@ class TestResumableWritableFileFlush(IsolatedAsyncioTestCase):
 
 
 class TestResumableWritableFileRetry(IsolatedAsyncioTestCase):
+    async def test_503_honors_retry_after_and_resumes(self):
+        total = 100
+        client = _make_session("sid-503-resume", total_size=total)
+        client.patch = MagicMock(
+            side_effect=[
+                _patch_cm(503, retry_after="7"),
+                _patch_cm(201, body=_node_dict()),
+            ]
+        )
+        client.head = MagicMock(return_value=_head_cm(200, upload_offset="40"))
+
+        with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
+            writable = _make_writable(client, "sid-503-resume", total, buf)
+            await writable.write(b"a" * total)
+            with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+                with self.assertLogs(
+                    "wcpan.drive.synology._client.writable", "WARNING"
+                ):
+                    await writable.flush()
+
+        sleep.assert_awaited_once_with(7.0)
+        _, retry_kwargs = client.patch.call_args_list[1]
+        self.assertEqual(retry_kwargs["headers"]["Upload-Offset"], "40")
+        self.assertEqual(retry_kwargs["headers"]["Content-Length"], "60")
+        self.assertIsNot(retry_kwargs["data"], buf)
+
     async def test_offset_mismatch_seeks_and_retries(self):
         # Server says it has 50 bytes when client thought it had 0.
         total = 100
@@ -216,18 +248,22 @@ class TestResumableWritableFileRetry(IsolatedAsyncioTestCase):
         _, kw2 = client.patch.call_args_list[1]
         self.assertEqual(kw2["headers"]["Upload-Offset"], "40")
 
-    async def test_503_raises_upload_error_without_retry(self):
+    async def test_503_retries_with_backoff(self):
         client = _make_session("sid-503", total_size=50)
         client.patch = MagicMock(return_value=_response_cm(503, {}))
 
         with tempfile.SpooledTemporaryFile(max_size=_MAX_SPOOL, mode="w+b") as buf:
             writable = _make_writable(client, "sid-503", 50, buf)
             await writable.write(b"c" * 50)
-            with self.assertRaises(SynologyUploadError):
-                await writable.flush()
+            with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+                with self.assertLogs(
+                    "wcpan.drive.synology._client.writable", "WARNING"
+                ):
+                    with self.assertRaises(SynologyUploadError):
+                        await writable.flush()
 
-        # Must not retry on 503
-        self.assertEqual(client.patch.call_count, 1)
+        self.assertEqual(client.patch.call_count, 6)
+        self.assertEqual(sleep.await_count, 5)
 
     async def test_404_raises_upload_error(self):
         client = _make_session("sid-404", total_size=50)

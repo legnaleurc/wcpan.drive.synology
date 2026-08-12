@@ -177,6 +177,9 @@ async def _managed_background_tasks(
         )
         await stack.enter_async_context(_background(group, _flip_ready()))
         await stack.enter_async_context(
+            _background(group, app[UPLOAD_SERVICE_KEY].cleanup_expired_sessions())
+        )
+        await stack.enter_async_context(
             _background(
                 group,
                 webhook_service.run(webhook_queue, group, scan_done_event),

@@ -317,6 +317,43 @@ class TestHeadUploadSession(IsolatedAsyncioTestCase):
         with self.assertRaises(web.HTTPNotFound):
             await head_upload_session(req)
 
+    async def test_head_refreshes_session_activity(self):
+        session = self._store.create("p", "f.bin", 2048, None, None)
+        session.last_activity = 10.0
+        req = _make_request(
+            app=_make_app(self._store),
+            match_info={"session_id": session.session_id},
+        )
+
+        with patch(
+            "wcpan.drive.synology._server.services.upload.time.monotonic",
+            return_value=20.0,
+        ):
+            await head_upload_session(req)
+
+        self.assertEqual(session.last_activity, 20.0)
+
+    async def test_expired_session_is_removed_with_temp_file(self):
+        session = self._store.create("p", "f.bin", 2048, None, None)
+        path = session.temp_path
+        session.last_activity = 10.0
+
+        removed = self._store.remove_expired(now=3610.0, ttl=3600.0)
+
+        self.assertEqual(removed, 1)
+        self.assertIsNone(self._store.get(session.session_id))
+        self.assertFalse(path.exists())
+
+    async def test_active_session_is_not_expired(self):
+        session = self._store.create("p", "f.bin", 2048, None, None)
+        session.last_activity = 10.0
+        session.uploading = True
+
+        removed = self._store.remove_expired(now=10_000.0, ttl=3600.0)
+
+        self.assertEqual(removed, 0)
+        self.assertIsNotNone(self._store.get(session.session_id))
+
 
 # ---------- delete_upload_session ----------
 
@@ -544,14 +581,14 @@ class TestPatchUploadChunk(IsolatedAsyncioTestCase):
                 headers={"Upload-Offset": "0"},
                 body=b"y" * 50,
             )
-            with self.assertRaises(web.HTTPServiceUnavailable):
+            with self.assertRaises(web.HTTPInsufficientStorage):
                 await patch_upload_chunk(req)
 
         self.assertIsNotNone(self._store.get(session.session_id))
         warning_log.assert_called_once()
         self.assertEqual(
             warning_log.call_args.args[0],
-            "upload session failed during finalisation session_id=%r name=%r parent_id=%r error=%s",
+            "upload session permanently failed during finalisation session_id=%r name=%r parent_id=%r error=%s",
         )
 
     async def test_finalise_network_failure_logs_warning_and_keeps_session(self):
@@ -597,7 +634,7 @@ class TestPatchUploadChunk(IsolatedAsyncioTestCase):
                 headers={"Upload-Offset": "0"},
                 body=b"y" * 50,
             )
-            with self.assertRaises(web.HTTPServiceUnavailable) as ctx:
+            with self.assertRaises(web.HTTPInsufficientStorage) as ctx:
                 await patch_upload_chunk(req)
 
         self.assertEqual(ctx.exception.reason, "Upload session size mismatch")
