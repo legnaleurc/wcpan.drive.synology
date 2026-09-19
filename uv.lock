@@ -612,6 +612,7 @@ server = [
     { name = "pymediainfo" },
     { name = "pyyaml" },
     { name = "wcpan-logging" },
+    { name = "wcpan-synology" },
 ]
 
 [package.dev-dependencies]
@@ -633,6 +634,7 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'server'", specifier = ">=6.0,<7.0" },
     { name = "wcpan-drive-core", specifier = ">=6.0.0,<7.0.0" },
     { name = "wcpan-logging", marker = "extra == 'server'", specifier = ">=2.1.0,<3.0.0" },
+    { name = "wcpan-synology", marker = "extra == 'server'", specifier = ">=0.2.0,<0.3.0" },
 ]
 provides-extras = ["server"]
 
@@ -651,6 +653,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/9a/5a/a39fab2964b5df24a620a2f0449617e4133f43b388496e7daa46812d976e/wcpan_logging-2.1.0.tar.gz", hash = "sha256:cfbffb17fbbc7318c1a9e004e9d8e32a1d7760d0512fab1cc86c4008bb8dd511", size = 3587, upload-time = "2024-04-15T02:29:53.59Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/86/5e/3ec79953563ba696b9e98ce639a29e498e9b7a7b1b67c92cec2d69cef42d/wcpan_logging-2.1.0-py3-none-any.whl", hash = "sha256:f7f22dc2c7324e9beef9543c8777aa03e40bb0c17863378551af121205738ae9", size = 4980, upload-time = "2024-04-15T02:29:51.9Z" },
+]
+
+[[package]]
+name = "wcpan-synology"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bf/e8/02a1507163899e67667f2e76fd6794b5a5ae8dd53dc30706f073f94b9a28/wcpan_synology-0.2.0.tar.gz", hash = "sha256:9aa9d0e6054c24f14c7f55fb46d642c3e58b66af73da2f57db6858da42ce145c", size = 82887, upload-time = "2026-09-19T17:27:23.194Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d2/64/2a2639371f26dfd5b6547a7d8304959d7cd60a8bd23be146be3906c1dec3/wcpan_synology-0.2.0-py3-none-any.whl", hash = "sha256:771f0311494c64c743392fa2f09bda7ce3f61670ccc624568bf386bf232e6b8d", size = 13181, upload-time = "2026-09-19T17:27:21.719Z" },
 ]
 
 [[package]]

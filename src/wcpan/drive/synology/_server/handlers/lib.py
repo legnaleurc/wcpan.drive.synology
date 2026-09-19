@@ -6,11 +6,10 @@ from dataclasses import replace
 
 from aiohttp import web
 from wcpan.drive.core.types import MediaInfo
+from wcpan.synology import SynologyFileInfo
 
 from ..._lib import NodeRecordDict, node_record_to_dict
 from ...types import MirrorStableId, NodeRecord
-from ..api.lib import convert_file_info
-from ..api.types import SynologyFileInfo
 from ..keys import (
     CHANGE_SERVICE_KEY,
     READY_KEY,
@@ -18,6 +17,7 @@ from ..keys import (
     SYNOLOGY_PATH_KEY,
 )
 from ..services.sync import NodeSyncService
+from ..synology import convert_file_info
 
 
 _MEDIA_QUERY_KEYS = ("width", "height", "ms_duration", "media_image", "media_video")

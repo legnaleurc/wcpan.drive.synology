@@ -4,13 +4,13 @@ import asyncio
 from dataclasses import dataclass, field
 from logging import getLogger
 
+from wcpan.synology import SynologyClient, SynologyFileId, SynologyPath
+
 from ..._lib import utc_now
 from ...types import MirrorMutableId, MirrorStableId, NodeRecord
-from ..api.drive import SynologyDriveApi
-from ..api.lib import convert_file_info
 from ..lib.bfs import parallel_bfs
 from ..lib.mounts import SERVER_ROOT_ID, mount_id
-from ..types import SynologyFileId, SynologyPath
+from ..synology import convert_file_info
 from .paths import SynologyPathService
 from .storage import StorageService
 from .sync import NodeSyncService
@@ -84,8 +84,8 @@ class StartupScanService:
     def __init__(
         self,
         *,
-        drive_api: SynologyDriveApi | None = None,
-        network: SynologyDriveApi | None = None,
+        drive_api: SynologyClient | None = None,
+        network: SynologyClient | None = None,
         storage: StorageService,
         syno_paths: SynologyPathService,
         node_sync: NodeSyncService,
@@ -93,7 +93,7 @@ class StartupScanService:
         resolved_drive_api = drive_api or network
         if resolved_drive_api is None:
             raise ValueError("drive_api is required")
-        self._drive_api: SynologyDriveApi = resolved_drive_api
+        self._drive_api: SynologyClient = resolved_drive_api
         self._storage = storage
         self._syno_paths = syno_paths
         self._node_sync = node_sync
@@ -180,7 +180,7 @@ class StartupScanService:
                         if record is None:
                             raise ValueError(f"missing DB record for {folder_id}")
                         _, api_count = await self._drive_api.list_folder(
-                            SynologyFileId.from_mirror_mutable_id(record.mutable_id),
+                            SynologyFileId(str(record.mutable_id)),
                             offset=0,
                             limit=1,
                         )

@@ -1,13 +1,14 @@
 """Server config loading and validation."""
 
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import yaml
 from dacite import Config, DaciteError, MissingValueError, WrongTypeError, from_dict
+from wcpan.synology import SynologyPath
 
-from .types import ServerConfig, SynologyPath
+from .types import ServerConfig
 
 
 CONFIG_VERSION = 2
@@ -97,7 +98,7 @@ def _server_config_from_raw(raw: RawServerConfig) -> ServerConfig:
         synology_url=raw.synology.url,
         username=raw.synology.username,
         password=raw.synology.password,
-        mounts={k: SynologyPath(PurePosixPath(v)) for k, v in raw.mounts.items()},
+        mounts={k: SynologyPath(v) for k, v in raw.mounts.items()},
         public_url=raw.synology.webhook.callback_url,
         webhook_app_id=raw.synology.webhook.app_id,
         local_paths=raw.local_paths,

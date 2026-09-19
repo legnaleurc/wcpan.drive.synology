@@ -37,7 +37,7 @@ async with create_service(server_url="http://localhost:8080") as file_service:
 
 ### Server
 
-The server mirrors a Synology Drive instance locally via a REST API and
+The server mirrors a Synology Drive instance locally via `wcpan-synology` and a
 webhook-driven update pipeline. Configure it with a YAML file (see
 `server.example.yaml`):
 
@@ -56,7 +56,8 @@ wcpan.drive.synology --config server.yaml squash
 
 At startup, the server:
 
-- connects to Synology Drive through DSM's WebStation API
+- connects to Synology Drive through DSM's WebStation API using
+  `wcpan-synology`
 - registers a webhook at `CALLBACK_URL/api/v1/synology-webhook`
 - serves a local HTTP API for the client integration
 - keeps a SQLite-backed mirror in sync through scans, webhook events, and
@@ -100,11 +101,12 @@ Important fields:
   webhook registration
 - `synology.otp_code`: optional 2FA code when the Synology account requires it
 
-For multipart uploads in particular, this project intentionally sends
-`Content-Type` only on the file part and not on scalar form fields. That
-behavior is confirmed against a real Synology server and should be preserved as
-a project compatibility requirement to avoid regressions, even though
-Synology's public docs do not appear to spell it out explicitly.
+Synology API behavior, reference types, and Synology-side exceptions are
+provided by `wcpan-synology`, which is only needed by the server (`server`
+extra). The client never raises `wcpan.synology` exceptions; it raises the
+errors in `wcpan.drive.synology.exceptions` (`SynologyServerError` and its
+subclasses for access, upload, and name-too-long failures), which describe the
+HTTP client/server boundary.
 
 ## Requirements
 
@@ -112,6 +114,7 @@ Synology's public docs do not appear to spell it out explicitly.
 - aiohttp >= 3.13.0
 - pycryptodome >= 3.0
 - wcpan-drive-core >= 6.0.0
+- wcpan-synology >= 0.2.0
 
 Server extras additionally require: dacite, pyyaml, pymediainfo, wcpan-logging.
 

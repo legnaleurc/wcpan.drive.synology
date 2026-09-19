@@ -4,9 +4,10 @@ from collections.abc import Generator
 from contextlib import closing, contextmanager
 from typing import Literal, TypedDict
 
+from wcpan.synology import SynologyPath
+
 from ...types import MirrorMutableId, MirrorStableId, NodeRecord
 from ..lib.mounts import SERVER_ROOT_ID
-from ..types import SynologyPath
 from .off_main import OffMainService
 
 
@@ -247,7 +248,7 @@ def _get_mount_max_ids(dsn: str, mounts: dict[str, SynologyPath]) -> dict[str, i
             result[name] = 0
             continue
         value, stored_path = state
-        result[name] = value if stored_path == str(syno_path) else 0
+        result[name] = value if stored_path == syno_path.path else 0
 
     return result
 

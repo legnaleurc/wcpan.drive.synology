@@ -2,76 +2,12 @@ from wcpan.drive.core.exceptions import DriveError
 
 
 __all__ = (
-    "SynologyAuthenticationError",
-    "SynologySessionExpiredError",
-    "SynologyApiError",
-    "SynologyUploadError",
-    "SynologyPermanentUploadError",
+    "SynologyAccessError",
     "SynologyNameTooLongError",
-    "SynologyUploadConflictError",
-    "SynologyNetworkError",
+    "SynologyPermanentUploadError",
     "SynologyServerError",
+    "SynologyUploadError",
 )
-
-
-class SynologyAuthenticationError(DriveError):
-    """Raised when authentication with Synology DSM fails."""
-
-    def __init__(self, message: str = "Authentication failed") -> None:
-        super().__init__(message)
-
-
-class SynologySessionExpiredError(DriveError):
-    """Raised when the session token has expired."""
-
-    def __init__(self, message: str = "Session expired") -> None:
-        super().__init__(message)
-
-
-class SynologyApiError(DriveError):
-    """Raised when Synology API returns an error."""
-
-    def __init__(
-        self,
-        message: str,
-        error_code: int | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.error_code = error_code
-
-
-class SynologyUploadError(DriveError):
-    """Raised when file upload fails."""
-
-    def __init__(self, message: str, file_name: str | None = None) -> None:
-        super().__init__(message)
-        self.file_name = file_name
-
-
-class SynologyPermanentUploadError(SynologyUploadError):
-    """Raised when retrying an upload cannot succeed without intervention."""
-
-    retryable = False
-
-
-class SynologyNameTooLongError(SynologyPermanentUploadError):
-    """Raised when Synology rejects an upload because its name is too long."""
-
-    reason = "name_too_long"
-
-
-class SynologyUploadConflictError(SynologyUploadError):
-    """Raised when upload is stopped because the file already exists."""
-
-    pass
-
-
-class SynologyNetworkError(DriveError):
-    """Raised when a network error occurs."""
-
-    def __init__(self, message: str, original_error: Exception | None = None) -> None:
-        super().__init__(message)
-        self.original_error = original_error
 
 
 class SynologyServerError(DriveError):
@@ -80,3 +16,29 @@ class SynologyServerError(DriveError):
     def __init__(self, message: str, status: int | None = None) -> None:
         super().__init__(message)
         self.status = status
+
+
+class SynologyAccessError(SynologyServerError):
+    """Raised when the server refuses or throttles a request (401/403/429)."""
+
+
+class SynologyUploadError(SynologyServerError):
+    """Raised when an upload through the server fails."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        file_name: str | None = None,
+        status: int | None = None,
+    ) -> None:
+        super().__init__(message, status)
+        self.file_name = file_name
+
+
+class SynologyPermanentUploadError(SynologyUploadError):
+    """An upload failure that cannot succeed by retrying unchanged."""
+
+
+class SynologyNameTooLongError(SynologyPermanentUploadError):
+    """The destination name was rejected as too long."""

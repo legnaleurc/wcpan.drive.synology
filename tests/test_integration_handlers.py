@@ -129,9 +129,8 @@ def _make_app(
         metadata_queue=asyncio.Queue(),
     )  # type: ignore[arg-type]
     drive_api = MagicMock()
-    drive_api.list_folder_all = AsyncMock(return_value=[])
-    drive_api.get_node_metadata = AsyncMock(return_value=None)
-    drive_api.get_file_metadata_by_path = AsyncMock(return_value=None)
+    drive_api.list_folder = AsyncMock(return_value=([], 0))
+    drive_api.get_file = AsyncMock(return_value=None)
     app[READY_KEY] = True
     app[STORAGE_KEY] = storage
     app[OFF_MAIN_KEY] = off_main
@@ -183,7 +182,7 @@ class TestMediaInfoContract(IsolatedAsyncioTestCase):
 
         with patch.object(
             app[SYNOLOGY_DRIVE_API_KEY],
-            "upload_file",
+            "upload",
             new_callable=AsyncMock,
             return_value=_FAKE_SYNO_INFO,
         ):
@@ -226,7 +225,7 @@ class TestMediaInfoContract(IsolatedAsyncioTestCase):
 
         with patch.object(
             app[SYNOLOGY_DRIVE_API_KEY],
-            "upload_file",
+            "upload",
             new_callable=AsyncMock,
             return_value=_FAKE_SYNO_INFO,
         ):
@@ -260,7 +259,7 @@ class TestMediaInfoContract(IsolatedAsyncioTestCase):
 
         with patch.object(
             app[SYNOLOGY_DRIVE_API_KEY],
-            "upload_file",
+            "upload",
             new_callable=AsyncMock,
             return_value=syno_info,
         ):
@@ -375,7 +374,7 @@ class TestUploadSessionProtocol(IsolatedAsyncioTestCase):
 
         with patch.object(
             app[SYNOLOGY_DRIVE_API_KEY],
-            "upload_file",
+            "upload",
             new_callable=AsyncMock,
             return_value=_FAKE_SYNO_INFO,
         ):

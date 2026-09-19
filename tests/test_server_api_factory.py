@@ -1,10 +1,10 @@
-from pathlib import PurePosixPath
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from wcpan.drive.synology._server.api import create_synology_drive_api
-from wcpan.drive.synology._server.api.webstation import WebStationSynologyDriveApi
-from wcpan.drive.synology._server.types import ServerConfig, SynologyPath
+from wcpan.synology import SynologyPath
+
+from wcpan.drive.synology._server.synology import create_synology_client
+from wcpan.drive.synology._server.types import ServerConfig
 
 
 def _config() -> ServerConfig:
@@ -15,7 +15,7 @@ def _config() -> ServerConfig:
         synology_url="https://nas.example",
         username="user",
         password="secret",
-        mounts={"docs": SynologyPath(PurePosixPath("/docs"))},
+        mounts={"docs": SynologyPath("/docs")},
         public_url="https://public.example",
         webhook_app_id="app-id",
         local_paths={},
@@ -29,17 +29,17 @@ def _cm(value: object) -> MagicMock:
     return cm
 
 
-class TestCreateSynologyDriveApi(IsolatedAsyncioTestCase):
+class TestCreateSynologyClient(IsolatedAsyncioTestCase):
     async def test_create_webstation_api(self) -> None:
-        network = MagicMock()
+        client = MagicMock()
         with patch(
-            "wcpan.drive.synology._server.api.create_webstation_network_service",
-            return_value=_cm(network),
-        ) as create_network:
-            async with create_synology_drive_api(_config()) as api:
-                self.assertIsInstance(api, WebStationSynologyDriveApi)
+            "wcpan.drive.synology._server.synology.create_client",
+            return_value=_cm(client),
+        ) as create:
+            async with create_synology_client(_config()) as api:
+                self.assertIs(api, client)
 
-        create_network.assert_called_once_with(
+        create.assert_called_once_with(
             base_url="https://nas.example",
             username="user",
             password="secret",

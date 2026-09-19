@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from wcpan.synology import SynologyUploadConflictError
 
 from wcpan.drive.synology._lib import node_record_from_dict
 from wcpan.drive.synology._server.handlers.nodes import create_node, upload_node
@@ -33,7 +34,6 @@ from wcpan.drive.synology._server.services.upload import (
     UploadSessionStore,
 )
 from wcpan.drive.synology._server.workers import create_write_queue
-from wcpan.drive.synology.exceptions import SynologyUploadConflictError
 from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
@@ -213,7 +213,7 @@ class TestFinaliseUploadConflict409(IsolatedAsyncioTestCase):
         app = _make_app(storage, self._store)
         with (
             patch.object(
-                app[SYNOLOGY_DRIVE_API_KEY], "upload_file", new_callable=AsyncMock
+                app[SYNOLOGY_DRIVE_API_KEY], "upload", new_callable=AsyncMock
             ) as mock_up,
             patch.object(
                 _FIND_CHILD_CLS,
@@ -259,7 +259,7 @@ class TestUploadNodeConflict409(IsolatedAsyncioTestCase):
 
         with (
             patch.object(
-                app[SYNOLOGY_DRIVE_API_KEY], "upload_file", new_callable=AsyncMock
+                app[SYNOLOGY_DRIVE_API_KEY], "upload", new_callable=AsyncMock
             ) as mock_up,
             patch.object(
                 _FIND_CHILD_CLS,

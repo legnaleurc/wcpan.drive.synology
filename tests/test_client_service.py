@@ -8,7 +8,7 @@ from wcpan.drive.core.exceptions import NodeExistsError, NodeNotFoundError
 from wcpan.drive.core.types import Node
 
 from wcpan.drive.synology._client.service import ClientFileService, _check
-from wcpan.drive.synology.exceptions import SynologyServerError
+from wcpan.drive.synology.exceptions import SynologyAccessError, SynologyServerError
 
 
 class TestCheck(TestCase):
@@ -18,6 +18,15 @@ class TestCheck(TestCase):
         # when / then
         with self.assertRaises(NodeNotFoundError):
             _check(status, "get_root")
+
+    def test_access_statuses_raise_access_error(self):
+        for status in (401, 403, 429):
+            with self.subTest(status=status):
+                # when
+                with self.assertRaises(SynologyAccessError) as ctx:
+                    _check(status, "delete")
+                # then
+                self.assertEqual(ctx.exception.status, status)
 
     def test_500_raises_server_error_with_status(self):
         # given

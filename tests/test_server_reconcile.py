@@ -10,6 +10,8 @@ from pathlib import PurePosixPath
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import MagicMock, patch
 
+from wcpan.synology import SynologyPath
+
 from wcpan.drive.synology._lib import FOLDER_MIME_TYPE
 from wcpan.drive.synology._server.lib.mounts import (
     SERVER_ROOT_ID,
@@ -24,7 +26,6 @@ from wcpan.drive.synology._server.services.paths import (
 )
 from wcpan.drive.synology._server.services.storage import StorageService
 from wcpan.drive.synology._server.services.sync import NodeSyncService
-from wcpan.drive.synology._server.types import SynologyPath
 from wcpan.drive.synology._server.workers import (
     create_metadata_queue,
     create_write_queue,
@@ -59,7 +60,7 @@ async def _reconcile_with_worker(
             local_paths={},
             metadata_queue=mq,
         )
-        syno_mounts = {k: SynologyPath(PurePosixPath(v)) for k, v in mounts.items()}
+        syno_mounts = {k: SynologyPath(v) for k, v in mounts.items()}
         syno_paths = SynologyPathService(
             registry=MountRegistry(mounts=syno_mounts, root_ids={}),
             storage=storage,

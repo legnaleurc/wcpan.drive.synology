@@ -3,7 +3,8 @@ import os
 from collections.abc import Awaitable, Callable
 from logging import getLogger
 
-from .api.types import SynologyWebhookEvent
+from wcpan.synology import SynologyWebhookEvent
+
 from .lib.debounce import Debouncer
 from .services.storage import StorageService
 from .types import MetadataQueue, MetadataWorkItem, WriteQueue

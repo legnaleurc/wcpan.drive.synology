@@ -1,8 +1,8 @@
 """Synology webhook HTTP handler."""
 
 from aiohttp import web
+from wcpan.synology import SynologyWebhookEvent
 
-from ..api.types import SynologyWebhookEvent
 from ..keys import WEBHOOK_QUEUE_KEY
 
 

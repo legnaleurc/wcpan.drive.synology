@@ -9,6 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from wcpan.synology import (
+    SynologyUploadConflictError,
+    SynologyUploadError,
+)
 
 from wcpan.drive.synology._lib import node_record_from_dict
 from wcpan.drive.synology._server.handlers.nodes import (
@@ -37,10 +41,6 @@ from wcpan.drive.synology._server.services.upload import (
     UploadSessionStore,
 )
 from wcpan.drive.synology._server.workers import create_write_queue
-from wcpan.drive.synology.exceptions import (
-    SynologyUploadConflictError,
-    SynologyUploadError,
-)
 from wcpan.drive.synology.types import MirrorMutableId, NodeRecord
 
 
@@ -158,9 +158,8 @@ def _make_app(storage: _FakeStorage) -> web.Application:
         metadata_queue=asyncio.Queue(),
     )  # type: ignore[arg-type]
     drive_api = MagicMock()
-    drive_api.list_folder_all = AsyncMock(return_value=[])
-    drive_api.get_node_metadata = AsyncMock(return_value=None)
-    drive_api.get_file_metadata_by_path = AsyncMock(return_value=None)
+    drive_api.list_folder = AsyncMock(return_value=([], 0))
+    drive_api.get_file = AsyncMock(return_value=None)
     app[READY_KEY] = True
     app[STORAGE_KEY] = storage
     app[OFF_MAIN_KEY] = off_main
@@ -298,7 +297,7 @@ class TestUpdateNode(IsolatedAsyncioTestCase):
         }
         with patch.object(
             app[SYNOLOGY_DRIVE_API_KEY],
-            "rename_node",
+            "rename",
             new_callable=AsyncMock,
             return_value=rename_result,
         ):
@@ -327,7 +326,7 @@ class TestUpdateNode(IsolatedAsyncioTestCase):
         }
         with patch.object(
             app[SYNOLOGY_DRIVE_API_KEY],
-            "rename_node",
+            "rename",
             new_callable=AsyncMock,
             return_value=rename_result,
         ) as rename_node:
@@ -345,9 +344,9 @@ class TestUpdateNode(IsolatedAsyncioTestCase):
         storage = _FakeStorage()
         storage._nodes["n1"] = _make_node()
         app = _make_app(storage)
-        app[SYNOLOGY_DRIVE_API_KEY].move_node = AsyncMock()
-        app[SYNOLOGY_DRIVE_API_KEY].get_node_metadata = AsyncMock(return_value=None)
-        app[SYNOLOGY_DRIVE_API_KEY].list_folder_all = AsyncMock(return_value=[])
+        app[SYNOLOGY_DRIVE_API_KEY].move = AsyncMock()
+        app[SYNOLOGY_DRIVE_API_KEY].get_file = AsyncMock(return_value=None)
+        app[SYNOLOGY_DRIVE_API_KEY].list_folder = AsyncMock(return_value=([], 0))
         async with TestClient(TestServer(app)) as client:
             resp = await client.patch(
                 "/api/v1/nodes/n1",
@@ -366,12 +365,12 @@ class TestUpdateNode(IsolatedAsyncioTestCase):
         with (
             patch.object(
                 app[SYNOLOGY_DRIVE_API_KEY],
-                "move_node",
+                "move",
                 new_callable=AsyncMock,
             ),
             patch.object(
                 app[SYNOLOGY_DRIVE_API_KEY],
-                "get_node_metadata",
+                "get_file",
                 new_callable=AsyncMock,
                 return_value={
                     "file_id": "n2",
@@ -408,7 +407,7 @@ class TestUpdateNode(IsolatedAsyncioTestCase):
         app = _make_app(storage)
         with patch.object(
             app[SYNOLOGY_DRIVE_API_KEY],
-            "rename_node",
+            "rename",
             new_callable=AsyncMock,
             side_effect=SynologyUploadConflictError("exists", file_name="x"),
         ):
@@ -446,7 +445,7 @@ class TestUpdateNode(IsolatedAsyncioTestCase):
         app = _make_app(storage)
         with patch.object(
             app[SYNOLOGY_DRIVE_API_KEY],
-            "move_node",
+            "move",
             new_callable=AsyncMock,
             side_effect=Exception("move failed"),
         ):
@@ -470,7 +469,7 @@ class TestDeleteNode(IsolatedAsyncioTestCase):
         app = _make_app(storage)
         with patch.object(
             app[SYNOLOGY_DRIVE_API_KEY],
-            "delete_node",
+            "delete",
             new_callable=AsyncMock,
         ):
             async with TestClient(TestServer(app)) as client:
@@ -516,7 +515,7 @@ class TestUploadNode(IsolatedAsyncioTestCase):
         }
         with patch.object(
             app[SYNOLOGY_DRIVE_API_KEY],
-            "upload_file",
+            "upload",
             new_callable=AsyncMock,
             return_value=upload_info,
         ):
@@ -550,7 +549,7 @@ class TestUploadNode(IsolatedAsyncioTestCase):
         }
         with patch.object(
             app[SYNOLOGY_DRIVE_API_KEY],
-            "upload_file",
+            "upload",
             new_callable=AsyncMock,
             return_value=upload_info,
         ) as upload_file:
@@ -591,7 +590,7 @@ class TestUploadNode(IsolatedAsyncioTestCase):
         app = _make_app(storage)
         with patch.object(
             app[SYNOLOGY_DRIVE_API_KEY],
-            "upload_file",
+            "upload",
             new_callable=AsyncMock,
             side_effect=SynologyUploadError("fail", file_name="x"),
         ):
@@ -606,7 +605,7 @@ class TestUploadNode(IsolatedAsyncioTestCase):
     async def test_conflict_returns_409_without_hitting_synology_upload(self):
         storage = _FakeStorage()
         app = _make_app(storage)
-        app[SYNOLOGY_DRIVE_API_KEY].get_node_metadata = AsyncMock(
+        app[SYNOLOGY_DRIVE_API_KEY].get_file = AsyncMock(
             return_value={
                 "file_id": "p1",
                 "permanent_link": "p1",
@@ -622,7 +621,7 @@ class TestUploadNode(IsolatedAsyncioTestCase):
                 "sync_id": 0,
             }
         )
-        app[SYNOLOGY_DRIVE_API_KEY].get_file_metadata_by_path = AsyncMock(
+        app[SYNOLOGY_DRIVE_API_KEY].get_file = AsyncMock(
             return_value={
                 "file_id": "existing-1",
                 "permanent_link": "existing-1",
@@ -645,7 +644,7 @@ class TestUploadNode(IsolatedAsyncioTestCase):
                 params={"name": "data.bin"},
             )
             self.assertEqual(resp.status, 409)
-        app[SYNOLOGY_DRIVE_API_KEY].upload_file.assert_not_called()
+        app[SYNOLOGY_DRIVE_API_KEY].upload.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

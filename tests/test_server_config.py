@@ -4,8 +4,10 @@ import io
 import tempfile
 import unittest
 from contextlib import redirect_stderr
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from unittest.mock import patch
+
+from wcpan.synology import SynologyPath
 
 from wcpan.drive.synology._server.config import (
     CONFIG_VERSION,
@@ -13,7 +15,6 @@ from wcpan.drive.synology._server.config import (
     parse_config,
 )
 from wcpan.drive.synology._server.main import main
-from wcpan.drive.synology._server.types import SynologyPath
 
 
 def _raw_config(**overrides):
@@ -116,7 +117,7 @@ class TestServerConfigDefaults(unittest.TestCase):
         self.assertEqual(config.synology_url, "https://nas.example:5001")
         self.assertEqual(config.username, "user-2")
         self.assertEqual(config.password, "secret-2")
-        self.assertEqual(config.mounts, {"docs": SynologyPath(PurePosixPath("/docs"))})
+        self.assertEqual(config.mounts, {"docs": SynologyPath("/docs")})
         self.assertEqual(config.public_url, "https://callback.example")
         self.assertEqual(config.webhook_app_id, "app-2")
         self.assertEqual(config.local_paths, {"/docs": "/mnt/docs"})

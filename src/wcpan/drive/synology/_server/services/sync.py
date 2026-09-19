@@ -3,8 +3,10 @@
 from functools import partial
 from logging import getLogger
 
+from wcpan.synology import SynologyPath
+
 from ...types import MirrorStableId, NodeRecord
-from ..types import MetadataQueue, MetadataWorkItem, SynologyPath, WriteQueue
+from ..types import MetadataQueue, MetadataWorkItem, WriteQueue
 from .enricher import MediaEnrichmentError, MediaEnrichService
 from .off_main import OffMainService
 from .paths import LocalPathService
@@ -216,7 +218,7 @@ class NodeSyncService:
     ) -> None:
         """Enqueue set_mount_state. Used by scanner to persist sync_id checkpoints."""
         await self._write_queue.put(
-            partial(self._storage.set_mount_state, name, str(path), checkpoint)
+            partial(self._storage.set_mount_state, name, path.path, checkpoint)
         )
 
     async def apply_deferred_removals(

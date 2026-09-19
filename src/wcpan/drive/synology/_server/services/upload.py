@@ -15,20 +15,20 @@ from pathlib import Path
 from typing import BinaryIO
 
 from wcpan.drive.core.types import MediaInfo
-
-from ...exceptions import (
+from wcpan.synology import (
+    SynologyClient,
+    SynologyFileInfo,
     SynologyNameTooLongError,
     SynologyNetworkError,
     SynologyUploadConflictError,
     SynologyUploadError,
 )
+
 from ...types import MirrorStableId, NodeRecord
-from ..api.drive import SynologyDriveApi
-from ..api.lib import convert_file_info
-from ..api.types import SynologyFileInfo
 from ..lib.names import normalize_name
 from ..services.paths import SynologyPathService
 from ..services.sync import NodeSyncService
+from ..synology import convert_file_info
 
 
 _L = getLogger(__name__)
@@ -171,7 +171,7 @@ class UploadService:
         *,
         store: UploadSessionStore,
         node_sync: NodeSyncService,
-        drive_api: SynologyDriveApi,
+        drive_api: SynologyClient,
         syno_paths: SynologyPathService,
         executor: Executor | None = None,
     ) -> None:
@@ -264,8 +264,8 @@ class UploadService:
             )
         parent_ref = await self._syno_paths.synology_parent_ref(parent_id)
         try:
-            info = await self._drive_api.upload_file(
-                parent_ref=parent_ref,
+            info = await self._drive_api.upload(
+                parent_path=parent_ref,
                 name=name,
                 data=content,
                 mime_type=mime_type,
@@ -377,8 +377,8 @@ class UploadService:
 
         try:
             with session.temp_path.open("rb") as f:
-                info = await self._drive_api.upload_file(
-                    parent_ref=parent_ref,
+                info = await self._drive_api.upload(
+                    parent_path=parent_ref,
                     name=session.name,
                     data=self._iter_file(f),
                     mime_type=session.mime_type,
@@ -505,7 +505,7 @@ def create_upload_service(
     *,
     tmp_dir: Path | None,
     node_sync: NodeSyncService,
-    drive_api: SynologyDriveApi,
+    drive_api: SynologyClient,
     syno_paths: SynologyPathService,
 ) -> Generator[UploadService, None, None]:
     with tempfile.TemporaryDirectory(

@@ -8,8 +8,8 @@ from logging import getLogger
 from pathlib import Path
 
 from aiohttp import web
+from wcpan.synology import SynologyClient
 
-from .api import SynologyDriveApi, create_synology_drive_api
 from .handlers.changes import get_changes, get_cursor, get_root
 from .handlers.health import get_livez, get_readyz, put_null
 from .handlers.nodes import (
@@ -48,6 +48,7 @@ from .services.storage import StorageService, create_storage_service
 from .services.sync import NodeSyncService
 from .services.upload import create_upload_service
 from .services.webhook import WebhookService
+from .synology import create_synology_client
 from .types import MetadataQueue, ServerConfig, WriteQueue
 from .workers import (
     METADATA_WORKER_COUNT,
@@ -85,26 +86,28 @@ async def _background[T](
 
 @asynccontextmanager
 async def _managed_webhook(
-    drive_api: SynologyDriveApi, config: ServerConfig
+    drive_api: SynologyClient, config: ServerConfig
 ) -> AsyncGenerator[None, None]:
-    stale = await drive_api.list_webhooks(config.webhook_app_id)
+    stale = await drive_api.list_webhooks(app_id=config.webhook_app_id)
     for hook in stale:
         try:
             await drive_api.delete_webhook(
-                str(hook["webhook_id"]), config.webhook_app_id
+                webhook_id=str(hook["webhook_id"]), app_id=config.webhook_app_id
             )
         except Exception:
             _L.warning("Failed to remove stale webhook %s", hook.get("webhook_id"))
     webhook_id = await drive_api.create_webhook(
-        f"{config.public_url}/api/v1/synology-webhook",
-        config.webhook_app_id,
+        url=f"{config.public_url}/api/v1/synology-webhook",
+        app_id=config.webhook_app_id,
     )
     _L.info("Webhook registered: id=%s", webhook_id)
     try:
         yield
     finally:
         try:
-            await drive_api.delete_webhook(webhook_id, config.webhook_app_id)
+            await drive_api.delete_webhook(
+                webhook_id=webhook_id, app_id=config.webhook_app_id
+            )
             _L.info("Webhook unregistered: id=%s", webhook_id)
         except Exception:
             _L.warning("Failed to unregister webhook id=%s", webhook_id)
@@ -120,7 +123,7 @@ async def managed_off_main() -> AsyncGenerator[OffMainService, None]:
 @asynccontextmanager
 async def _managed_background_tasks(
     app: web.Application,
-    drive_api: SynologyDriveApi,
+    drive_api: SynologyClient,
     storage: StorageService,
     write_queue: WriteQueue,
     mount_registry: MountRegistry,
@@ -191,8 +194,8 @@ async def _managed_background_tasks(
 async def _app_lifecycle(app: web.Application) -> AsyncGenerator[None, None]:
     config: ServerConfig = app[CONFIG_KEY]
     async with AsyncExitStack() as stack:
-        drive_api: SynologyDriveApi = await stack.enter_async_context(
-            create_synology_drive_api(config)
+        drive_api: SynologyClient = await stack.enter_async_context(
+            create_synology_client(config)
         )
         off_main = await stack.enter_async_context(managed_off_main())
         storage = await create_storage_service(config.database_url, off_main=off_main)

@@ -358,14 +358,10 @@ class TestNodeSyncServiceReconcile(IsolatedAsyncioTestCase):
 
 class TestNodeSyncServiceLifecycle(IsolatedAsyncioTestCase):
     async def test_set_mount_watermark(self):
-        from pathlib import PurePosixPath
-
-        from wcpan.drive.synology._server.types import SynologyPath
+        from wcpan.synology import SynologyPath
 
         cs, storage, wq = _make_service()
-        await cs.set_mount_watermark(
-            "docs", SynologyPath(PurePosixPath("/team-folders/docs")), 42
-        )
+        await cs.set_mount_watermark("docs", SynologyPath("/team-folders/docs"), 42)
         self.assertEqual(wq.qsize(), 1)
         op = wq.get_nowait()
         await op()

@@ -11,18 +11,19 @@ Three focused service classes:
 
 from pathlib import Path
 
-from ...types import MirrorStableId, NodeRecord
-from ..api.drive import SynologyDriveApi
-from ..api.types import SynologyFileInfo
-from ..lib.mounts import SERVER_ROOT_ID, MountRegistry, is_virtual, mount_name
-from ..lib.names import normalize_name
-from ..types import (
+from wcpan.synology import (
     SynologyChildRef,
+    SynologyClient,
     SynologyFileId,
+    SynologyFileInfo,
     SynologyParentRef,
     SynologyPath,
-    VirtualPath,
 )
+
+from ...types import MirrorStableId, NodeRecord
+from ..lib.mounts import SERVER_ROOT_ID, MountRegistry, is_virtual, mount_name
+from ..lib.names import normalize_name
+from ..types import VirtualPath
 from .storage import StorageService
 
 
@@ -64,16 +65,23 @@ class SynologyPathService:
 
     async def list_children(
         self,
-        drive_api: SynologyDriveApi,
+        drive_api: SynologyClient,
         parent_node_id: MirrorStableId,
     ) -> list[SynologyFileInfo]:
         """List children of a mirror parent node ID."""
         folder_ref = await self.synology_parent_ref(parent_node_id)
-        return await drive_api.list_folder_all(folder_ref)
+        all_items: list[SynologyFileInfo] = []
+        offset = 0
+        while True:
+            items, total = await drive_api.list_folder(folder_ref, offset=offset)
+            all_items.extend(items)
+            offset += len(items)
+            if offset >= total or not items:
+                return all_items
 
     async def find_child_by_name(
         self,
-        drive_api: SynologyDriveApi,
+        drive_api: SynologyClient,
         parent_node_id: MirrorStableId,
         name: str,
     ) -> SynologyFileInfo | None:
@@ -82,7 +90,7 @@ class SynologyPathService:
             parent_ref=parent_ref,
             name=normalize_name(name),
         )
-        return await drive_api.get_node_metadata(child_ref)
+        return await drive_api.get_file(child_ref)
 
     async def _resolve_mutable_id_ref(
         self,
@@ -93,7 +101,7 @@ class SynologyPathService:
             raise ValueError(
                 f"No node found for non-mount parent_id: {parent_node_id!r}"
             )
-        return SynologyFileId.from_mirror_mutable_id(record.mutable_id)
+        return SynologyFileId(str(record.mutable_id))
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +223,7 @@ def _resolve_local_path(
         return None
 
     relative = "/".join(reversed(parts))
-    full_synology_path = str(syno_path).rstrip("/") + "/" + relative
+    full_synology_path = syno_path.path.rstrip("/") + "/" + relative
 
     # Apply longest-prefix match from local_paths
     best_prefix = ""

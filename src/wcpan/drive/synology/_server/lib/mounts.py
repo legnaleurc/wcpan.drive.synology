@@ -1,8 +1,13 @@
 """Virtual-ID grammar and mount-node helpers."""
 
+from wcpan.synology import (
+    SynologyClient,
+    SynologyFileId,
+    SynologyFileInfo,
+    SynologyPath,
+)
+
 from ...types import MirrorStableId
-from ..api.drive import SynologyDriveApi
-from ..types import SynologyFileId, SynologyPath
 
 
 VIRTUAL_ID_PREFIX = "_"
@@ -31,7 +36,7 @@ def mount_name(node_id: MirrorStableId) -> str | None:
 
 def _check_no_nested_mounts(mounts: dict[str, SynologyPath]) -> None:
     """Raise if any mount point is a subdirectory of another mount point."""
-    paths = sorted(str(path).rstrip("/") for path in mounts.values())
+    paths = sorted(path.path.rstrip("/") for path in mounts.values())
     for i, path_a in enumerate(paths):
         for path_b in paths[i + 1 :]:
             if path_b.startswith(path_a + "/"):
@@ -66,7 +71,7 @@ class MountRegistry:
 async def create_mount_registry(
     mounts: dict[str, SynologyPath],
     *,
-    drive_api: SynologyDriveApi,
+    drive_api: SynologyClient,
 ) -> MountRegistry:
     """Resolve Synology root IDs for all mounts. Raises RuntimeError on any failure."""
     _check_no_nested_mounts(mounts)
@@ -75,7 +80,7 @@ async def create_mount_registry(
         info = await get_file_metadata_by_path(syno_path, drive_api=drive_api)
         if info is None:
             raise RuntimeError(
-                f"Mount {name!r} ({syno_path}) not found on Synology Drive"
+                f"Mount {name!r} ({syno_path.path}) not found on Synology Drive"
             )
         root_ids[SynologyFileId(file_id=info["file_id"])] = mount_id(name)
     return MountRegistry(mounts=mounts, root_ids=root_ids)
@@ -84,6 +89,6 @@ async def create_mount_registry(
 async def get_file_metadata_by_path(
     syno_path: SynologyPath,
     *,
-    drive_api: SynologyDriveApi,
-):
-    return await drive_api.get_file_metadata_by_path(syno_path)
+    drive_api: SynologyClient,
+) -> SynologyFileInfo | None:
+    return await drive_api.get_file(syno_path)

@@ -25,7 +25,7 @@ from .._lib import (
     node_from_record,
     node_record_from_dict,
 )
-from ..exceptions import SynologyApiError, SynologyServerError
+from ..exceptions import SynologyAccessError, SynologyServerError
 from .hasher import create_hasher
 from .http409 import node_from_409
 from .readable import ClientReadableFile
@@ -202,9 +202,7 @@ def _check(status: int, operation: str) -> None:
     if status == 404:
         raise NodeNotFoundError(operation)
     if status in (401, 403, 429):
-        raise SynologyApiError(
-            f"{operation} failed with status {status}", error_code=status
-        )
+        raise SynologyAccessError(f"{operation} failed with status {status}", status)
     if status >= 500:
         raise SynologyServerError(f"{operation} failed", status=status)
     if status >= 400:

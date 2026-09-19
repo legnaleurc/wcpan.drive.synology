@@ -4,18 +4,19 @@ import asyncio
 from dataclasses import dataclass
 from logging import getLogger
 
-from ...types import MirrorStableId, NodeRecord
-from ..api.drive import SynologyDriveApi
-from ..api.lib import convert_file_info
-from ..api.types import SynologyWebhookEvent
+from wcpan.synology import (
+    SynologyClient,
+    SynologyFileId,
+    SynologyPermanentLink,
+    SynologyWebhookEvent,
+)
+
+from ...types import MirrorMutableId, MirrorStableId, NodeRecord
 from ..lib.bfs import parallel_bfs
 from ..lib.debounce import TaskIdDebouncer
 from ..lib.mounts import MountRegistry, mount_name
-from ..types import (
-    SynologyFileId,
-    SynologyPermanentLink,
-    WriteQueue,
-)
+from ..synology import convert_file_info
+from ..types import WriteQueue
 from ..workers import WebhookQueue
 from .paths import SynologyPathService
 from .storage import StorageService
@@ -47,7 +48,7 @@ class WebhookService:
     def __init__(
         self,
         *,
-        drive_api: SynologyDriveApi,
+        drive_api: SynologyClient,
         storage: StorageService,
         node_sync: NodeSyncService,
         syno_paths: SynologyPathService,
@@ -76,14 +77,14 @@ class WebhookService:
             )
             return
         parent_node = await self._storage.get_node_by_mutable_id(
-            parent_file_ref.to_mirror_mutable_id()
+            MirrorMutableId(parent_file_ref.file_id)
         )
         if parent_node is None:
             resolved = self._mount_registry.lookup_mount_virtual_id(parent_file_ref)
             if resolved is None:
                 if event_type in ("file_moved", "file_renamed"):
                     existing = await self._storage.get_node_by_id(
-                        permanent_link_ref.to_mirror_stable_id()
+                        MirrorStableId(permanent_link_ref.permanent_link)
                     )
                     if existing is not None:
                         _L.debug(
@@ -102,7 +103,7 @@ class WebhookService:
             effective_parent_id = resolved
         else:
             effective_parent_id = parent_node.id
-        info = await self._drive_api.get_node_metadata(permanent_link_ref)
+        info = await self._drive_api.get_file(permanent_link_ref)
         if not info:
             _L.warning(
                 "%s not found after %s; skipping",
@@ -144,7 +145,7 @@ class WebhookService:
                 file_ref=file_ref,
                 permanent_link_ref=permanent_link_ref,
                 parent_file_ref=parent_file_ref,
-                delete_id=permanent_link_ref.to_mirror_stable_id(),
+                delete_id=MirrorStableId(permanent_link_ref.permanent_link),
             )
 
         if event_type == "file_modified" and file_type == "file":
@@ -258,11 +259,11 @@ class WebhookService:
             return False
 
         source_node = await self._storage.get_node_by_id(
-            plan.permanent_link_ref.to_mirror_stable_id()
+            MirrorStableId(plan.permanent_link_ref.permanent_link)
         )
         if source_node is None:
             source_node = await self._storage.get_node_by_mutable_id(
-                plan.file_ref.to_mirror_mutable_id()
+                MirrorMutableId(plan.file_ref.file_id)
             )
         if source_node is None:
             return False
@@ -273,7 +274,7 @@ class WebhookService:
         if parent_ref is None:
             return False
         destination_parent = await self._storage.get_node_by_mutable_id(
-            parent_ref.to_mirror_mutable_id()
+            MirrorMutableId(parent_ref.file_id)
         )
         if destination_parent is not None:
             return await self._is_node_under_configured_mount(destination_parent)
@@ -336,19 +337,16 @@ class WebhookService:
         permanent_link_ref: SynologyPermanentLink,
     ) -> MirrorStableId | None:
         record = await self._storage.get_node_by_id(
-            permanent_link_ref.to_mirror_stable_id()
+            MirrorStableId(permanent_link_ref.permanent_link)
         )
         if record is not None:
             return record.id
-        info = await self._drive_api.get_node_metadata(permanent_link_ref)
+        info = await self._drive_api.get_file(permanent_link_ref)
         if info is not None:
-            return (
-                MirrorStableId(info["permanent_link"])
-                if info["permanent_link"]
-                else permanent_link_ref.to_mirror_stable_id()
-            )
+            permanent_link = info.get("permanent_link")
+            return MirrorStableId(permanent_link or permanent_link_ref.permanent_link)
         record = await self._storage.get_node_by_mutable_id(
-            file_ref.to_mirror_mutable_id()
+            MirrorMutableId(file_ref.file_id)
         )
         if record is not None:
             return record.id

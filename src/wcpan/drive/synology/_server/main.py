@@ -11,7 +11,6 @@ from pathlib import Path
 from aiohttp import web
 from wcpan.logging import ConfigBuilder
 
-from .api import create_synology_drive_api
 from .app import create_app, managed_off_main
 from .config import ConfigVersionError, load_config
 from .lib.mounts import create_mount_registry
@@ -24,6 +23,7 @@ from .services.storage import (
     reset_change_history,
 )
 from .services.sync import NodeSyncService
+from .synology import create_synology_client
 from .types import ServerConfig
 from .workers import (
     METADATA_WORKER_COUNT,
@@ -138,7 +138,7 @@ async def run_backfill(
 ) -> dict[str, int]:
     """Build ``BackfillService`` with the same stack as server startup (no HTTP/webhook)."""
     async with AsyncExitStack() as stack:
-        drive_api = await stack.enter_async_context(create_synology_drive_api(config))
+        drive_api = await stack.enter_async_context(create_synology_client(config))
         off_main = await stack.enter_async_context(managed_off_main())
         storage = await create_storage_service(config.database_url, off_main=off_main)
         write_queue = create_write_queue()

@@ -4,6 +4,13 @@ from pathlib import PurePosixPath
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from wcpan.synology import (
+    SynologyApiError,
+    SynologyChildRef,
+    SynologyFileId,
+    SynologyPath,
+)
+
 from wcpan.drive.synology._server.lib.mounts import (
     SERVER_ROOT_ID,
     MountRegistry,
@@ -14,11 +21,6 @@ from wcpan.drive.synology._server.lib.mounts import (
     mount_name,
 )
 from wcpan.drive.synology._server.services.paths import SynologyPathService
-from wcpan.drive.synology._server.types import (
-    SynologyChildRef,
-    SynologyFileId,
-    SynologyPath,
-)
 from wcpan.drive.synology.types import MirrorMutableId, MirrorStableId
 
 
@@ -152,8 +154,8 @@ class TestCreateMountRegistry(IsolatedAsyncioTestCase):
 
     async def test_resolves_root_ids_for_non_nested_mounts(self):
         mounts = {
-            "photos": SynologyPath(PurePosixPath("/volume1/photos")),
-            "videos": SynologyPath(PurePosixPath("/volume1/videos")),
+            "photos": SynologyPath("/volume1/photos"),
+            "videos": SynologyPath("/volume1/videos"),
         }
         network = MagicMock()
         with patch(
@@ -178,8 +180,8 @@ class TestCreateMountRegistry(IsolatedAsyncioTestCase):
 
     async def test_nested_mounts_raise_before_metadata_lookup(self):
         mounts = {
-            "photos": SynologyPath(PurePosixPath("/volume1/photos")),
-            "photos_2024": SynologyPath(PurePosixPath("/volume1/photos/2024")),
+            "photos": SynologyPath("/volume1/photos"),
+            "photos_2024": SynologyPath("/volume1/photos/2024"),
         }
         with patch(
             "wcpan.drive.synology._server.lib.mounts.get_file_metadata_by_path",
@@ -191,16 +193,16 @@ class TestCreateMountRegistry(IsolatedAsyncioTestCase):
 
     async def test_nested_mounts_raise_in_reversed_order(self):
         mounts = {
-            "photos_2024": SynologyPath(PurePosixPath("/volume1/photos/2024")),
-            "photos": SynologyPath(PurePosixPath("/volume1/photos")),
+            "photos_2024": SynologyPath("/volume1/photos/2024"),
+            "photos": SynologyPath("/volume1/photos"),
         }
         with self.assertRaises(ValueError):
             await create_mount_registry(mounts, drive_api=MagicMock())
 
     async def test_prefix_but_not_subdirectory_is_ok(self):
         mounts = {
-            "photos": SynologyPath(PurePosixPath("/volume1/photos")),
-            "photos_archive": SynologyPath(PurePosixPath("/volume1/photos_archive")),
+            "photos": SynologyPath("/volume1/photos"),
+            "photos_archive": SynologyPath("/volume1/photos_archive"),
         }
         with patch(
             "wcpan.drive.synology._server.lib.mounts.get_file_metadata_by_path",
@@ -222,35 +224,35 @@ class TestCreateMountRegistry(IsolatedAsyncioTestCase):
 
     async def test_trailing_slash_is_normalized_for_nested_check(self):
         mounts = {
-            "a": SynologyPath(PurePosixPath("/volume1/photos/")),
-            "b": SynologyPath(PurePosixPath("/volume1/photos/2024")),
+            "a": SynologyPath("/volume1/photos/"),
+            "b": SynologyPath("/volume1/photos/2024"),
         }
         with self.assertRaises(ValueError):
             await create_mount_registry(mounts, drive_api=MagicMock())
 
 
 class TestFindChildByName(IsolatedAsyncioTestCase):
-    async def test_mount_parent_calls_get_node_metadata_with_child_ref(self):
+    async def test_mount_parent_calls_get_file_with_child_ref(self):
         # given
-        mount_path = SynologyPath(PurePosixPath("/volume1/photos"))
+        mount_path = SynologyPath("/volume1/photos")
         svc = SynologyPathService(
             registry=MountRegistry(mounts={"photos": mount_path}, root_ids={}),
             storage=MagicMock(),
         )
         drive_api = MagicMock()
         expected = {"name": "2024"}
-        drive_api.get_node_metadata = AsyncMock(return_value=expected)
+        drive_api.get_file = AsyncMock(return_value=expected)
         # when
         result = await svc.find_child_by_name(
             drive_api, MirrorStableId("_photos"), "2024"
         )
         # then
-        drive_api.get_node_metadata.assert_awaited_once_with(
+        drive_api.get_file.assert_awaited_once_with(
             SynologyChildRef(parent_ref=mount_path, name="2024")
         )
         self.assertEqual(result, expected)
 
-    async def test_non_mount_parent_calls_get_node_metadata_with_child_ref(self):
+    async def test_non_mount_parent_calls_get_file_with_child_ref(self):
         # given
         storage = MagicMock()
         node_record = MagicMock()
@@ -262,13 +264,13 @@ class TestFindChildByName(IsolatedAsyncioTestCase):
         )
         drive_api = MagicMock()
         expected = {"name": "img.jpg"}
-        drive_api.get_node_metadata = AsyncMock(return_value=expected)
+        drive_api.get_file = AsyncMock(return_value=expected)
         # when
         result = await svc.find_child_by_name(
             drive_api, MirrorStableId("42"), "img.jpg"
         )
         # then
-        drive_api.get_node_metadata.assert_awaited_once_with(
+        drive_api.get_file.assert_awaited_once_with(
             SynologyChildRef(
                 parent_ref=SynologyFileId(file_id="42"),
                 name="img.jpg",
@@ -285,7 +287,24 @@ class TestFindChildByName(IsolatedAsyncioTestCase):
             storage=storage,
         )
         drive_api = MagicMock()
-        drive_api.get_node_metadata = AsyncMock(return_value=None)
+        drive_api.get_file = AsyncMock(return_value=None)
         # when / then
         with self.assertRaises(ValueError):
             await svc.find_child_by_name(drive_api, MirrorStableId("99"), "child.txt")
+
+    async def test_api_error_propagates(self):
+        mount_path = SynologyPath("/volume1/photos")
+        svc = SynologyPathService(
+            registry=MountRegistry(mounts={"photos": mount_path}, root_ids={}),
+            storage=MagicMock(),
+        )
+        error = SynologyApiError("permission denied", error_code=105)
+        drive_api = MagicMock()
+        drive_api.get_file = AsyncMock(side_effect=error)
+
+        with self.assertRaises(SynologyApiError) as caught:
+            await svc.find_child_by_name(
+                drive_api, MirrorStableId("_photos"), "private.txt"
+            )
+
+        self.assertIs(caught.exception, error)

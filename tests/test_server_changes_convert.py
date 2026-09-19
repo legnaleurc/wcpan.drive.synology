@@ -8,7 +8,6 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from wcpan.drive.synology._lib import FOLDER_MIME_TYPE
-from wcpan.drive.synology._server.api.lib import convert_file_info as _convert
 from wcpan.drive.synology._server.services.enricher import (
     MediaEnrichmentError,
     MediaEnrichService,
@@ -16,6 +15,7 @@ from wcpan.drive.synology._server.services.enricher import (
 from wcpan.drive.synology._server.services.off_main import OffMainService
 from wcpan.drive.synology._server.services.paths import LocalPathService
 from wcpan.drive.synology._server.services.sync import NodeSyncService
+from wcpan.drive.synology._server.synology import convert_file_info as _convert
 from wcpan.drive.synology._server.types import MetadataWorkItem
 from wcpan.drive.synology._server.workers import (
     create_metadata_queue,

@@ -1,13 +1,27 @@
-"""Helpers for adapting Synology API payloads into internal models."""
+"""Adapters between wcpan.synology and the local mirror."""
 
+from contextlib import AbstractAsyncContextManager
 from logging import getLogger
 
-from ..._lib import guess_mime_type
-from ...types import MirrorMutableId, MirrorStableId, NodeRecord
-from .types import SynologyFileInfo
+from wcpan.synology import SynologyClient, SynologyFileInfo, create_client
+
+from .._lib import guess_mime_type
+from ..types import MirrorMutableId, MirrorStableId, NodeRecord
+from .types import ServerConfig
 
 
 _L = getLogger(__name__)
+
+
+def create_synology_client(
+    config: ServerConfig,
+) -> AbstractAsyncContextManager[SynologyClient]:
+    return create_client(
+        base_url=config.synology_url,
+        username=config.username,
+        password=config.password,
+        otp_code=config.otp_code,
+    )
 
 
 def convert_file_info(
@@ -16,10 +30,6 @@ def convert_file_info(
 ) -> NodeRecord | None:
     is_dir = info["type"] == "dir"
     name = info["name"]
-    is_image = info.get("content_type") == "image"
-    is_video = info.get("content_type") == "video"
-    width = height = ms_duration = 0
-
     permanent_link = info.get("permanent_link")
     if not permanent_link:
         _L.warning(
@@ -38,10 +48,10 @@ def convert_file_info(
         mime_type=guess_mime_type(name, is_directory=is_dir),
         hash=info.get("hash", ""),
         size=info.get("size", 0),
-        is_image=is_image,
-        is_video=is_video,
-        width=width,
-        height=height,
-        ms_duration=ms_duration,
+        is_image=info.get("content_type") == "image",
+        is_video=info.get("content_type") == "video",
+        width=0,
+        height=0,
+        ms_duration=0,
         mutable_id=MirrorMutableId(info["file_id"]),
     )

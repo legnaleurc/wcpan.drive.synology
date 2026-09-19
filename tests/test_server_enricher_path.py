@@ -3,6 +3,8 @@
 from pathlib import Path
 from unittest import TestCase
 
+from wcpan.synology import SynologyPath
+
 from wcpan.drive.synology._server.services.paths import (
     _resolve_local_path as resolve_local_path,
 )
@@ -43,7 +45,7 @@ class TestResolveLocalPath(TestCase):
         file_rec = _node("fid", "readme.txt", "folder_id")
         folder_rec = _node("folder_id", "Projects", "_docs", is_directory=True)
         cache = {"folder_id": folder_rec}
-        mounts = {"docs": "/volume1/docs"}
+        mounts = {"docs": SynologyPath("/volume1/docs")}
         local_paths = {"/volume1/docs": "/mnt/nas/docs"}
         # when
         path = resolve_local_path(mounts, local_paths, file_rec, cache)
@@ -54,7 +56,7 @@ class TestResolveLocalPath(TestCase):
         # given
         file_rec = _node("fid", "a.txt", "missing_parent")
         cache: dict[str, NodeRecord | None] = {}
-        mounts = {"docs": "/volume1/docs"}
+        mounts = {"docs": SynologyPath("/volume1/docs")}
         local_paths = {"/volume1/docs": "/mnt/x"}
         # when
         path = resolve_local_path(mounts, local_paths, file_rec, cache)
@@ -66,7 +68,7 @@ class TestResolveLocalPath(TestCase):
         file_rec = _node("fid", "a.txt", "folder_id")
         folder_rec = _node("folder_id", "x", "_docs", is_directory=True)
         cache = {"folder_id": folder_rec}
-        mounts = {"docs": "/volume1/docs"}
+        mounts = {"docs": SynologyPath("/volume1/docs")}
         local_paths = {"/other/prefix": "/mnt/other"}
         # when
         path = resolve_local_path(mounts, local_paths, file_rec, cache)
@@ -78,7 +80,7 @@ class TestResolveLocalPath(TestCase):
         file_rec = _node("fid", "f.txt", "folder_id")
         folder_rec = _node("folder_id", "sub", "_share", is_directory=True)
         cache = {"folder_id": folder_rec}
-        mounts = {"share": "/vol/share"}
+        mounts = {"share": SynologyPath("/vol/share")}
         local_paths = {
             "/vol": "/mnt/root",
             "/vol/share": "/mnt/share",

@@ -3,11 +3,12 @@
 import logging
 from pathlib import PurePosixPath
 
+from wcpan.synology import SynologyClient
+
 from ...types import MirrorStableId, NodeRecord
-from ..api.drive import SynologyDriveApi
-from ..api.lib import convert_file_info
 from ..lib.bfs import parallel_bfs
 from ..lib.mounts import SERVER_ROOT_ID
+from ..synology import convert_file_info
 from ..types import VirtualPath
 from .paths import SynologyPathService, VirtualPathService
 from .storage import StorageService
@@ -53,8 +54,8 @@ class BackfillService:
     def __init__(
         self,
         *,
-        drive_api: SynologyDriveApi | None = None,
-        network: SynologyDriveApi | None = None,
+        drive_api: SynologyClient | None = None,
+        network: SynologyClient | None = None,
         storage: StorageService,
         syno_paths: SynologyPathService,
         node_sync: NodeSyncService,
@@ -62,7 +63,7 @@ class BackfillService:
         resolved_drive_api = drive_api or network
         if resolved_drive_api is None:
             raise ValueError("drive_api is required")
-        self._drive_api: SynologyDriveApi = resolved_drive_api
+        self._drive_api: SynologyClient = resolved_drive_api
         self._storage = storage
         self._syno_paths = syno_paths
         self._node_sync = node_sync

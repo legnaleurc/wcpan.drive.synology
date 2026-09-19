@@ -5,13 +5,14 @@ import logging
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from wcpan.drive.synology._server.lib.mounts import MountRegistry
-from wcpan.drive.synology._server.services.sync import NodeSyncService
-from wcpan.drive.synology._server.services.webhook import WebhookService
-from wcpan.drive.synology._server.types import (
+from wcpan.synology import (
     SynologyFileId,
     SynologyPermanentLink,
 )
+
+from wcpan.drive.synology._server.lib.mounts import MountRegistry
+from wcpan.drive.synology._server.services.sync import NodeSyncService
+from wcpan.drive.synology._server.services.webhook import WebhookService
 from wcpan.drive.synology.types import MirrorMutableId, MirrorStableId, NodeRecord
 
 
@@ -89,7 +90,7 @@ class TestFetchAndEnrich(IsolatedAsyncioTestCase):
         storage.get_node_by_mutable_id = AsyncMock(return_value=_make_node("p1"))
         node_sync = MagicMock(spec=NodeSyncService)
         node_sync.upsert = AsyncMock(return_value=_make_node())
-        network.get_node_metadata = AsyncMock(return_value=_FAKE_SYNO_INFO)
+        network.get_file = AsyncMock(return_value=_FAKE_SYNO_INFO)
         service = _make_service(network, storage, node_sync)
 
         await service._fetch_and_enrich(
@@ -164,7 +165,7 @@ class TestFetchAndEnrich(IsolatedAsyncioTestCase):
             },
         )
         network = MagicMock()
-        network.get_node_metadata = AsyncMock(return_value=_FAKE_SYNO_INFO)
+        network.get_file = AsyncMock(return_value=_FAKE_SYNO_INFO)
         service = _make_service(network, storage, node_sync, mount_registry=registry)
 
         await service._fetch_and_enrich(
@@ -181,7 +182,7 @@ class TestFetchAndEnrich(IsolatedAsyncioTestCase):
         storage = MagicMock()
         storage.get_node_by_mutable_id = AsyncMock(return_value=_make_node("p1"))
         network = MagicMock()
-        network.get_node_metadata = AsyncMock(return_value=None)
+        network.get_file = AsyncMock(return_value=None)
         service = _make_service(network, storage)
 
         await service._fetch_and_enrich(
@@ -204,7 +205,7 @@ class TestClassifyWebhookItem(IsolatedAsyncioTestCase):
         storage.get_node_by_mutable_id = AsyncMock(return_value=_make_node("p1"))
         node_sync = MagicMock(spec=NodeSyncService)
         node_sync.upsert = AsyncMock(return_value=_make_node())
-        network.get_node_metadata = AsyncMock(return_value=_FAKE_SYNO_INFO)
+        network.get_file = AsyncMock(return_value=_FAKE_SYNO_INFO)
         registry = MountRegistry(mounts={}, root_ids={})
         return _make_service(network, storage, node_sync, mount_registry=registry)
 
@@ -680,7 +681,7 @@ class TestResolveMovedDirRootId(IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(rv, "perm-1")
-        drive_api.get_node_metadata.assert_not_called()
+        drive_api.get_file.assert_not_called()
         storage.get_node_by_mutable_id.assert_not_awaited()
 
     async def test_falls_back_to_metadata_permanent_link(self):
@@ -688,7 +689,7 @@ class TestResolveMovedDirRootId(IsolatedAsyncioTestCase):
         storage.get_node_by_id = AsyncMock(return_value=None)
         storage.get_node_by_mutable_id = AsyncMock(return_value=None)
         drive_api = MagicMock()
-        drive_api.get_node_metadata = AsyncMock(
+        drive_api.get_file = AsyncMock(
             return_value={**_FAKE_SYNO_INFO, "permanent_link": "perm-2"}
         )
         service = _make_service(drive_api, storage)
@@ -706,7 +707,7 @@ class TestResolveMovedDirRootId(IsolatedAsyncioTestCase):
         storage.get_node_by_id = AsyncMock(return_value=None)
         storage.get_node_by_mutable_id = AsyncMock(return_value=_make_node("mirror-1"))
         drive_api = MagicMock()
-        drive_api.get_node_metadata = AsyncMock(return_value=None)
+        drive_api.get_file = AsyncMock(return_value=None)
         service = _make_service(drive_api, storage)
 
         rv = await service._resolve_moved_dir_root_id(
@@ -722,7 +723,7 @@ class TestResolveMovedDirRootId(IsolatedAsyncioTestCase):
         storage.get_node_by_id = AsyncMock(return_value=None)
         storage.get_node_by_mutable_id = AsyncMock(return_value=None)
         drive_api = MagicMock()
-        drive_api.get_node_metadata = AsyncMock(return_value=None)
+        drive_api.get_file = AsyncMock(return_value=None)
         service = _make_service(drive_api, storage)
 
         rv = await service._resolve_moved_dir_root_id(
@@ -772,7 +773,7 @@ class TestWebhookServiceMovedDir(IsolatedAsyncioTestCase):
         scan_done_event = asyncio.Event()
         scan_done_event.set()
 
-        drive_api.get_node_metadata = AsyncMock(return_value=None)
+        drive_api.get_file = AsyncMock(return_value=None)
 
         with patch.object(
             service,

@@ -4,15 +4,15 @@ from logging import getLogger
 
 from aiohttp import web
 from aiohttp.client_exceptions import ClientConnectionResetError
-
-from ..._lib import guess_mime_type, utc_now
-from ...exceptions import (
+from wcpan.synology import (
+    SynologyClient,
     SynologyNetworkError,
+    SynologyPermanentLink,
     SynologyUploadConflictError,
 )
+
+from ..._lib import guess_mime_type, utc_now
 from ...types import MirrorMutableId, MirrorStableId, NodeRecord
-from ..api.drive import SynologyDriveApi
-from ..api.lib import convert_file_info
 from ..keys import (
     CHANGE_SERVICE_KEY,
     STORAGE_KEY,
@@ -29,7 +29,7 @@ from ..services.upload import (
     UploadService,
     UploadTransientError,
 )
-from ..types import SynologyPermanentLink
+from ..synology import convert_file_info
 from .lib import (
     media_info_from_query,
     record_to_response,
@@ -42,18 +42,18 @@ _L = getLogger(__name__)
 
 
 def _stable_node_ref(record: NodeRecord) -> SynologyPermanentLink:
-    return SynologyPermanentLink.from_mirror_stable_id(record.id)
+    return SynologyPermanentLink(str(record.id))
 
 
 async def _resolve_actual_record_after_move(
-    drive_api: SynologyDriveApi,
+    drive_api: SynologyClient,
     syno_paths: SynologyPathService,
     *,
     moved_node_ref: SynologyPermanentLink,
     expected_parent_node_id: MirrorStableId,
     expected_name: str,
 ) -> NodeRecord | None:
-    info = await drive_api.get_node_metadata(moved_node_ref)
+    info = await drive_api.get_file(moved_node_ref)
     if info is None:
         info = await syno_paths.find_child_by_name(
             drive_api,
@@ -94,8 +94,8 @@ async def download_node(request: web.Request) -> web.StreamResponse:
     await response.prepare(request)
 
     try:
-        async with drive_api.download_file(
-            _stable_node_ref(record), range_
+        async with drive_api.download(
+            _stable_node_ref(record), range_=range_
         ) as syno_response:
             async for chunk in syno_response.content.iter_any():
                 await response.write(chunk)
@@ -198,7 +198,7 @@ async def update_node(request: web.Request) -> web.Response:
 
     if new_name and new_name != record.name:
         try:
-            info = await drive_api.rename_node(
+            info = await drive_api.rename(
                 _stable_node_ref(updated_record),
                 new_name,
             )
@@ -230,7 +230,7 @@ async def update_node(request: web.Request) -> web.Response:
     if new_parent_id and new_parent_id != record.parent_id:
         new_parent_ref = await syno_paths.synology_parent_ref(new_parent_id)
         try:
-            await drive_api.move_node(
+            await drive_api.move(
                 _stable_node_ref(updated_record),
                 new_parent_ref,
             )
@@ -285,7 +285,7 @@ async def delete_node(request: web.Request) -> web.Response:
     if record is None:
         raise web.HTTPNotFound()
 
-    await drive_api.delete_node(_stable_node_ref(record))
+    await drive_api.delete(_stable_node_ref(record))
     await node_sync.delete(node_id)
     return web.Response(status=204)
 

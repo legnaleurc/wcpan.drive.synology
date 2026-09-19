@@ -9,6 +9,11 @@ from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from aiohttp import web
+from wcpan.synology import (
+    SynologyNameTooLongError,
+    SynologyNetworkError,
+    SynologyUploadError,
+)
 
 from wcpan.drive.synology._server.handlers.upload import (
     create_upload_session,
@@ -33,11 +38,6 @@ from wcpan.drive.synology._server.services.upload import (
     _L,
     UploadService,
     UploadSessionStore,
-)
-from wcpan.drive.synology.exceptions import (
-    SynologyNameTooLongError,
-    SynologyNetworkError,
-    SynologyUploadError,
 )
 from wcpan.drive.synology.types import MirrorMutableId
 
@@ -77,9 +77,8 @@ def _make_app(store: UploadSessionStore) -> dict:
         metadata_queue=asyncio.Queue(),
     )  # type: ignore[arg-type]
     drive_api = MagicMock()
-    drive_api.list_folder_all = AsyncMock(return_value=[])
-    drive_api.get_node_metadata = AsyncMock(return_value=None)
-    drive_api.get_file_metadata_by_path = AsyncMock(return_value=None)
+    drive_api.list_folder = AsyncMock(return_value=([], 0))
+    drive_api.get_file = AsyncMock(return_value=None)
     app[READY_KEY] = True
     app[OFF_MAIN_KEY] = off_main
     app[STORAGE_KEY] = storage
@@ -165,8 +164,8 @@ class TestCreateUploadSession(IsolatedAsyncioTestCase):
         self.assertIsNotNone(session)
         assert session is not None
         self.assertEqual(session.name, normalized_name)
-        called_ref = app[SYNOLOGY_DRIVE_API_KEY].get_node_metadata.await_args.args[0]
-        self.assertTrue(str(called_ref).endswith(f"/{normalized_name}"))
+        called_ref = app[SYNOLOGY_DRIVE_API_KEY].get_file.await_args.args[0]
+        self.assertEqual(called_ref.name, normalized_name)
 
     async def test_missing_name_raises_400(self):
         req = _make_request(
@@ -234,7 +233,7 @@ class TestCreateUploadSession(IsolatedAsyncioTestCase):
 
     async def test_conflict_returns_409_with_existing_node(self):
         app = _make_app(self._store)
-        app[SYNOLOGY_DRIVE_API_KEY].get_node_metadata = AsyncMock(
+        app[SYNOLOGY_DRIVE_API_KEY].get_file = AsyncMock(
             return_value={
                 "file_id": "p1",
                 "permanent_link": "p1",
@@ -250,7 +249,7 @@ class TestCreateUploadSession(IsolatedAsyncioTestCase):
                 "sync_id": 0,
             }
         )
-        app[SYNOLOGY_DRIVE_API_KEY].get_file_metadata_by_path = AsyncMock(
+        app[SYNOLOGY_DRIVE_API_KEY].get_file = AsyncMock(
             return_value={
                 "file_id": "existing-1",
                 "permanent_link": "existing-1",
@@ -519,7 +518,7 @@ class TestPatchUploadChunk(IsolatedAsyncioTestCase):
         with (
             patch.object(
                 app[SYNOLOGY_DRIVE_API_KEY],
-                "upload_file",
+                "upload",
                 new_callable=AsyncMock,
                 return_value={
                     "file_id": "new-node-1",
@@ -570,7 +569,7 @@ class TestPatchUploadChunk(IsolatedAsyncioTestCase):
         with (
             patch.object(
                 app[SYNOLOGY_DRIVE_API_KEY],
-                "upload_file",
+                "upload",
                 new_callable=AsyncMock,
                 side_effect=SynologyUploadError(
                     "upload failed",
@@ -598,7 +597,7 @@ class TestPatchUploadChunk(IsolatedAsyncioTestCase):
     async def test_name_too_long_returns_typed_422(self):
         session = self._make_session(total=50)
         app = _make_app(self._store)
-        app[SYNOLOGY_DRIVE_API_KEY].upload_file = AsyncMock(
+        app[SYNOLOGY_DRIVE_API_KEY].upload = AsyncMock(
             side_effect=SynologyNameTooLongError(
                 "File name is too long", file_name="f.bin"
             )
@@ -622,7 +621,7 @@ class TestPatchUploadChunk(IsolatedAsyncioTestCase):
         with (
             patch.object(
                 app[SYNOLOGY_DRIVE_API_KEY],
-                "upload_file",
+                "upload",
                 new_callable=AsyncMock,
                 side_effect=SynologyNetworkError("connection reset"),
             ),

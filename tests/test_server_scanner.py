@@ -8,6 +8,8 @@ from contextlib import suppress
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from wcpan.synology import SynologyPath
+
 from wcpan.drive.synology._server.lib.mounts import MountRegistry
 from wcpan.drive.synology._server.services.off_main import OffMainService
 from wcpan.drive.synology._server.services.paths import SynologyPathService
@@ -33,7 +35,7 @@ class TestScannerWriteBack(IsolatedAsyncioTestCase):
     async def _run_initial_sync(
         self,
         storage: StorageService,
-        mounts: dict[str, str],
+        mounts: dict[str, SynologyPath],
         scan_result: dict[str, int],
         pre_scan_result: dict[str, int] | None = None,
     ) -> None:
@@ -81,7 +83,7 @@ class TestScannerWriteBack(IsolatedAsyncioTestCase):
             with ThreadPoolExecutor() as pool:
                 storage = StorageService(db_path, off_main=OffMainService(pool=pool))
                 await storage.ensure_schema()
-                mounts = {"a": "/vol/a", "b": "/vol/b"}
+                mounts = {"a": SynologyPath("/vol/a"), "b": SynologyPath("/vol/b")}
 
                 await self._run_initial_sync(storage, mounts, {"a": 500, "b": 300})
 
@@ -98,7 +100,7 @@ class TestScannerWriteBack(IsolatedAsyncioTestCase):
             with ThreadPoolExecutor() as pool:
                 storage = StorageService(db_path, off_main=OffMainService(pool=pool))
                 await storage.ensure_schema()
-                mounts = {"a": "/vol/a", "b": "/vol/b"}
+                mounts = {"a": SynologyPath("/vol/a"), "b": SynologyPath("/vol/b")}
                 # Seed existing per-mount state
                 await storage.set_mount_state("a", "/vol/a", 100)
                 await storage.set_mount_state("b", "/vol/b", 80)
@@ -118,7 +120,7 @@ class TestScannerWriteBack(IsolatedAsyncioTestCase):
             with ThreadPoolExecutor() as pool:
                 storage = StorageService(db_path, off_main=OffMainService(pool=pool))
                 await storage.ensure_schema()
-                mounts = {"a": "/vol/a", "b": "/vol/b"}
+                mounts = {"a": SynologyPath("/vol/a"), "b": SynologyPath("/vol/b")}
                 await storage.set_mount_state("a", "/vol/a", 100)
                 await storage.set_mount_state("b", "/vol/b", 80)
 
@@ -143,7 +145,7 @@ class TestScannerWriteBack(IsolatedAsyncioTestCase):
             with ThreadPoolExecutor() as pool:
                 storage = StorageService(db_path, off_main=OffMainService(pool=pool))
                 await storage.ensure_schema()
-                mounts = {"a": "/vol/a"}
+                mounts = {"a": SynologyPath("/vol/a")}
 
                 # per_mount_highest=500 (saw a late folder), pre_scan=300 (snapshot
                 # taken before BFS started); the DB must record 300 so that the

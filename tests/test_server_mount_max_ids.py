@@ -6,6 +6,8 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from unittest import IsolatedAsyncioTestCase
 
+from wcpan.synology import SynologyPath
+
 from wcpan.drive.synology._server.services.off_main import OffMainService
 from wcpan.drive.synology._server.services.storage import (
     SchemaVersionError,
@@ -40,25 +42,31 @@ class TestGetMountMaxIds(IsolatedAsyncioTestCase):
         con.close()
 
     async def test_fresh_db_returns_zero_for_all_mounts(self) -> None:
-        mounts = {"LV": "/team-folders/video/L", "LG": "/team-folders/gallery/L"}
+        mounts = {
+            "LV": SynologyPath("/team-folders/video/L"),
+            "LG": SynologyPath("/team-folders/gallery/L"),
+        }
         result = await self.storage.get_mount_max_ids(mounts)
         self.assertEqual(result, {"LV": 0, "LG": 0})
 
     async def test_unknown_mount_gets_zero(self) -> None:
         self._write_mount("LV", 35000, "/team-folders/video/L")
-        mounts = {"LV": "/team-folders/video/L", "LG": "/team-folders/gallery/L"}
+        mounts = {
+            "LV": SynologyPath("/team-folders/video/L"),
+            "LG": SynologyPath("/team-folders/gallery/L"),
+        }
         result = await self.storage.get_mount_max_ids(mounts)
         self.assertEqual(result, {"LV": 35000, "LG": 0})
 
     async def test_path_change_resets_to_zero(self) -> None:
         self._write_mount("LV", 35000, "/old/path")
-        mounts = {"LV": "/new/path"}
+        mounts = {"LV": SynologyPath("/new/path")}
         result = await self.storage.get_mount_max_ids(mounts)
         self.assertEqual(result["LV"], 0)
 
     async def test_matching_path_preserves_value(self) -> None:
         self._write_mount("LV", 35000, "/team-folders/video/L")
-        mounts = {"LV": "/team-folders/video/L"}
+        mounts = {"LV": SynologyPath("/team-folders/video/L")}
         result = await self.storage.get_mount_max_ids(mounts)
         self.assertEqual(result["LV"], 35000)
 
@@ -103,7 +111,7 @@ class TestSetMountState(IsolatedAsyncioTestCase):
         )
 
     async def test_roundtrip_via_get_mount_max_ids(self) -> None:
-        mounts = {"LV": "/team-folders/video/L"}
+        mounts = {"LV": SynologyPath("/team-folders/video/L")}
         await self.storage.set_mount_state("LV", "/team-folders/video/L", 35000)
         result = await self.storage.get_mount_max_ids(mounts)
         self.assertEqual(result, {"LV": 35000})
