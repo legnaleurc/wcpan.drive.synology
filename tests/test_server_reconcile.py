@@ -302,7 +302,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
                     ]
                 )
                 mounts = {"docs": "/volume1/docs"}
-                network = MagicMock()
+                drive_api = MagicMock()
 
                 async def _list_children(_nw: object, parent_id: str) -> list[dict]:
                     if parent_id == "dir-1":
@@ -312,7 +312,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
                 stats = await _reconcile_with_worker(
                     storage,
                     mounts,
-                    network,
+                    drive_api,
                     "dir-1",
                     dry_run=False,
                     list_children_side_effect=_list_children,
@@ -345,7 +345,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
                     ]
                 )
                 mounts = {"docs": "/volume1/docs"}
-                network = MagicMock()
+                drive_api = MagicMock()
                 listed: list[str] = []
 
                 async def _list_children(_nw: object, parent_id: str) -> list[dict]:
@@ -357,7 +357,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
                 stats = await _reconcile_with_worker(
                     storage,
                     mounts,
-                    network,
+                    drive_api,
                     SERVER_ROOT_ID,
                     dry_run=False,
                     list_children_side_effect=_list_children,
@@ -386,7 +386,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
                     ]
                 )
                 mounts = {"docs": "/volume1/docs"}
-                network = MagicMock()
+                drive_api = MagicMock()
 
                 async def _list_children(_nw: object, parent_id: str) -> list[dict]:
                     if parent_id == "dir-1":
@@ -396,7 +396,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
                 stats = await _reconcile_with_worker(
                     storage,
                     mounts,
-                    network,
+                    drive_api,
                     "dir-1",
                     dry_run=True,
                     list_children_side_effect=_list_children,
@@ -426,7 +426,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
                     ]
                 )
                 mounts = {"docs": "/volume1/docs"}
-                network = MagicMock()
+                drive_api = MagicMock()
 
                 async def _list_children(_nw: object, parent_id: str) -> list[dict]:
                     if parent_id == "dir-1":
@@ -436,7 +436,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
                 stats = await _reconcile_with_worker(
                     storage,
                     mounts,
-                    network,
+                    drive_api,
                     "dir-1",
                     dry_run=False,
                     list_children_side_effect=_list_children,
@@ -468,7 +468,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
                     ]
                 )
                 mounts = {"docs": "/volume1/docs"}
-                network = MagicMock()
+                drive_api = MagicMock()
 
                 async def _list_children(_nw: object, parent_id: str) -> list[dict]:
                     if parent_id == "dir-1":
@@ -478,7 +478,7 @@ class TestReconcileSubtree(IsolatedAsyncioTestCase):
                 stats = await _reconcile_with_worker(
                     storage,
                     mounts,
-                    network,
+                    drive_api,
                     "dir-1",
                     dry_run=True,
                     list_children_side_effect=_list_children,

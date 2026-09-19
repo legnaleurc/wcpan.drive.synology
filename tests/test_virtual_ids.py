@@ -157,7 +157,7 @@ class TestCreateMountRegistry(IsolatedAsyncioTestCase):
             "photos": SynologyPath("/volume1/photos"),
             "videos": SynologyPath("/volume1/videos"),
         }
-        network = MagicMock()
+        drive_api = MagicMock()
         with patch(
             "wcpan.drive.synology._server.lib.mounts.get_file_metadata_by_path",
             new_callable=AsyncMock,
@@ -166,7 +166,7 @@ class TestCreateMountRegistry(IsolatedAsyncioTestCase):
                 {"file_id": "id-2"},
             ],
         ) as mock_get:
-            registry = await create_mount_registry(mounts, drive_api=network)
+            registry = await create_mount_registry(mounts, drive_api=drive_api)
         self.assertEqual(registry.mounts, mounts)
         self.assertEqual(
             registry.lookup_mount_virtual_id(SynologyFileId(file_id="id-1")),

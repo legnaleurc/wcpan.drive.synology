@@ -104,7 +104,7 @@ async def download_node(request: web.Request) -> web.StreamResponse:
         pass  # client disconnected
     except SynologyNetworkError as e:
         if isinstance(e.original_error, (ConnectionError, ClientConnectionResetError)):
-            pass  # client disconnect wrapped by network.fetch
+            pass  # client disconnect wrapped by drive_api.download
         else:
             _L.warning("Download stream error for node %s: %s", node_id, e)
 

@@ -36,7 +36,7 @@ class SynologyPathService:
     """Bridge between virtual ID space and Synology Drive API.
 
     Captures *mounts* so callers no longer pass it on every call.
-    ``network`` remains a method parameter because it varies per context
+    ``drive_api`` remains a method parameter because it varies per context
     (handlers pull from app keys, services hold their own reference).
     """
 

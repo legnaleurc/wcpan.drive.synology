@@ -54,16 +54,12 @@ class BackfillService:
     def __init__(
         self,
         *,
-        drive_api: SynologyClient | None = None,
-        network: SynologyClient | None = None,
+        drive_api: SynologyClient,
         storage: StorageService,
         syno_paths: SynologyPathService,
         node_sync: NodeSyncService,
     ) -> None:
-        resolved_drive_api = drive_api or network
-        if resolved_drive_api is None:
-            raise ValueError("drive_api is required")
-        self._drive_api: SynologyClient = resolved_drive_api
+        self._drive_api = drive_api
         self._storage = storage
         self._syno_paths = syno_paths
         self._node_sync = node_sync

@@ -85,13 +85,13 @@ def _make_service(
 
 class TestFetchAndEnrich(IsolatedAsyncioTestCase):
     async def test_success(self):
-        network = MagicMock()
+        drive_api = MagicMock()
         storage = MagicMock()
         storage.get_node_by_mutable_id = AsyncMock(return_value=_make_node("p1"))
         node_sync = MagicMock(spec=NodeSyncService)
         node_sync.upsert = AsyncMock(return_value=_make_node())
-        network.get_file = AsyncMock(return_value=_FAKE_SYNO_INFO)
-        service = _make_service(network, storage, node_sync)
+        drive_api.get_file = AsyncMock(return_value=_FAKE_SYNO_INFO)
+        service = _make_service(drive_api, storage, node_sync)
 
         await service._fetch_and_enrich(
             SynologyFileId(file_id="f1"),
@@ -164,9 +164,9 @@ class TestFetchAndEnrich(IsolatedAsyncioTestCase):
                 SynologyFileId(file_id="real-parent"): MirrorStableId("_docs"),
             },
         )
-        network = MagicMock()
-        network.get_file = AsyncMock(return_value=_FAKE_SYNO_INFO)
-        service = _make_service(network, storage, node_sync, mount_registry=registry)
+        drive_api = MagicMock()
+        drive_api.get_file = AsyncMock(return_value=_FAKE_SYNO_INFO)
+        service = _make_service(drive_api, storage, node_sync, mount_registry=registry)
 
         await service._fetch_and_enrich(
             SynologyFileId(file_id="f1"),
@@ -181,9 +181,9 @@ class TestFetchAndEnrich(IsolatedAsyncioTestCase):
     async def test_metadata_not_found_skips(self):
         storage = MagicMock()
         storage.get_node_by_mutable_id = AsyncMock(return_value=_make_node("p1"))
-        network = MagicMock()
-        network.get_file = AsyncMock(return_value=None)
-        service = _make_service(network, storage)
+        drive_api = MagicMock()
+        drive_api.get_file = AsyncMock(return_value=None)
+        service = _make_service(drive_api, storage)
 
         await service._fetch_and_enrich(
             SynologyFileId(file_id="f1"),
@@ -200,14 +200,14 @@ class TestFetchAndEnrich(IsolatedAsyncioTestCase):
 
 class TestClassifyWebhookItem(IsolatedAsyncioTestCase):
     def _service(self):
-        network = MagicMock()
+        drive_api = MagicMock()
         storage = MagicMock()
         storage.get_node_by_mutable_id = AsyncMock(return_value=_make_node("p1"))
         node_sync = MagicMock(spec=NodeSyncService)
         node_sync.upsert = AsyncMock(return_value=_make_node())
-        network.get_file = AsyncMock(return_value=_FAKE_SYNO_INFO)
+        drive_api.get_file = AsyncMock(return_value=_FAKE_SYNO_INFO)
         registry = MountRegistry(mounts={}, root_ids={})
-        return _make_service(network, storage, node_sync, mount_registry=registry)
+        return _make_service(drive_api, storage, node_sync, mount_registry=registry)
 
     async def test_empty_file_id_schedules_delayed_upsert(self):
         service = self._service()
