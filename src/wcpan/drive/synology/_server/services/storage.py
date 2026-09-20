@@ -2,7 +2,6 @@ import logging
 import sqlite3
 from collections.abc import Generator
 from contextlib import closing, contextmanager
-from typing import Literal, TypedDict
 
 from wcpan.synology import SynologyPath
 
@@ -12,19 +11,6 @@ from .off_main import OffMainService
 
 
 _L = logging.getLogger(__name__)
-
-
-class WebhookDeleteOperation(TypedDict):
-    type: Literal["delete"]
-    node_id: MirrorStableId
-
-
-class WebhookUpsertOperation(TypedDict):
-    type: Literal["upsert"]
-    record: NodeRecord
-
-
-type WebhookOperation = WebhookDeleteOperation | WebhookUpsertOperation
 
 
 class SchemaVersionError(RuntimeError):
@@ -615,23 +601,6 @@ def reset_change_history(dsn: str) -> int:
             return int(cur.fetchone()["n"])
 
 
-def _apply_webhook_batch(dsn: str, operations: list[WebhookOperation]) -> None:
-    """Apply a batch of webhook operations in one transaction."""
-    if not operations:
-        return
-    with _read_write(dsn) as con:
-        for op in operations:
-            if op["type"] == "delete":
-                _delete_subtree_on_connection(con, op["node_id"])
-            elif op["type"] == "upsert":
-                record = op["record"]
-                con.execute(_PRESERVE_MEDIA_UPSERT_SQL, _node_row_values(record))
-                con.execute(
-                    "INSERT INTO changes (node_id, is_removed) VALUES (?, 0)",
-                    (str(record.id),),
-                )
-
-
 def _build_deferred_preserved_set(
     dsn: str,
     seen_ids: set[MirrorStableId],
@@ -726,9 +695,6 @@ class StorageService:
         upserts: list[NodeRecord],
     ) -> None:
         await self._off_main(_apply_scan_folder_batch, self._dsn, delete_roots, upserts)
-
-    async def apply_webhook_batch(self, operations: list[WebhookOperation]) -> None:
-        await self._off_main(_apply_webhook_batch, self._dsn, operations)
 
     async def resolve_path_to_id(self, segments: list[str]) -> MirrorStableId | None:
         return await self._off_main(_resolve_path_to_id, self._dsn, segments)
